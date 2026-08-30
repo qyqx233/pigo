@@ -61,7 +61,7 @@ func newStreamHandler(ch chan tea.Msg, extra func(agentcore.AgentEvent)) runtime
 			case agentcore.ToolExecutionUpdateEvent:
 				ch <- toolUpdateMsg{id: e.ToolCallID, partial: agentcore.ContentToText(e.PartialResult.Content)}
 			case agentcore.ToolExecutionEndEvent:
-				ch <- toolEndMsg{id: e.ToolCallID, ok: !e.IsError, result: agentcore.ContentToText(e.Result.Content)}
+				ch <- toolEndMsg{id: e.ToolCallID, ok: !e.IsError, result: agentcore.ContentToText(e.Result.Content), details: e.Result.Details}
 			case agentcore.SubAgentProgressEvent:
 				ch <- subagentProgressMsg{id: e.ToolCallID, desc: e.Description, activity: e.Activity, tokens: e.Tokens}
 			case agentcore.TelemetryEvent:

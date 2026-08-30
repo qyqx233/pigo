@@ -41,22 +41,32 @@ type Theme struct {
 	ScrollTrack lipgloss.Style
 	// Spinner styles the animated "working" indicator glyph + verb (warm coral).
 	Spinner lipgloss.Style
+	// DiffAdd styles added lines in a rendered diff (green).
+	DiffAdd lipgloss.Style
+	// DiffDel styles removed lines in a rendered diff (red).
+	DiffDel lipgloss.Style
+	// DiffHunk styles @@ hunk markers in a rendered diff (cyan).
+	DiffHunk lipgloss.Style
+	// DiffCtx styles unchanged context lines and file headers in a rendered
+	// diff (dim gray).
+	DiffCtx lipgloss.Style
 }
 
 // Palette color numbers use the ANSI 256-color cube so the theme renders
 // consistently across terminals without depending on true-color support.
 const (
-	colorSuccess = "42"  // green
-	colorError   = "196" // red
-	colorWarn    = "214" // yellow/amber
-	colorAccent  = "39"  // blue (file names, highlights)
-	colorGray    = "245" // secondary / muted text
-	colorScroll  = "250" // scrollbar thumb (bright gray pill, clearly visible)
-	colorTrack   = "240" // scrollbar groove (dim gray, visible but recessive)
-	colorUser    = "15"  // bright white
-	colorAssist  = "252" // near-white
-	colorStatus  = "62"  // status bar background (violet)
-	colorSpinner = "173" // spinner glyph/verb (warm coral, matches Claude Code)
+	colorSuccess  = "42"  // green
+	colorError    = "196" // red
+	colorWarn     = "214" // yellow/amber
+	colorAccent   = "39"  // blue (file names, highlights)
+	colorGray     = "245" // secondary / muted text
+	colorScroll   = "250" // scrollbar thumb (bright gray pill, clearly visible)
+	colorTrack    = "240" // scrollbar groove (dim gray, visible but recessive)
+	colorUser     = "15"  // bright white
+	colorAssist   = "252" // near-white
+	colorStatus   = "62"  // status bar background (violet)
+	colorSpinner  = "173" // spinner glyph/verb (warm coral, matches Claude Code)
+	colorDiffMeta = "37"  // diff @@ hunk markers (cyan, git convention)
 )
 
 // DefaultTheme returns the built-in palette described in the SPEC: success
@@ -97,6 +107,14 @@ func DefaultTheme() Theme {
 		Spinner: lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorSpinner)).
 			Bold(true),
+		DiffAdd: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(colorSuccess)),
+		DiffDel: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(colorError)),
+		DiffHunk: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(colorDiffMeta)),
+		DiffCtx: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(colorGray)),
 	}
 }
 

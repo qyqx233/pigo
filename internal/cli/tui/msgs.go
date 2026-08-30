@@ -38,11 +38,13 @@ type toolUpdateMsg struct {
 }
 
 // toolEndMsg is emitted when a tool finishes. ok is false when the tool reported
-// an error; result is the tool's textual output.
+// an error; result is the tool's textual output; details carries the tool's
+// result metadata (Details) when it reported any, e.g. edit's diff.
 type toolEndMsg struct {
-	id     string
-	ok     bool
-	result string
+	id      string
+	ok      bool
+	result  string
+	details any
 }
 
 // subagentProgressMsg carries a running sub-agent's structured progress

@@ -16,6 +16,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli"
 	"github.com/smallnest/pigo/internal/cli/memstatus"
 	"github.com/smallnest/pigo/internal/cli/status"
+	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/memory"
 	"github.com/smallnest/pigo/internal/runtime"
 )
@@ -427,7 +428,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				card.state = cardWarn
 			}
-			card.response = parseToolResult(msg.result)
+			// A tool that reported a diff (edit) gets a colored Diff section; the
+			// diff is also embedded in the result text, so strip it there to keep
+			// the card from showing the change twice (#560).
+			result := msg.result
+			if diff, ok := ui.DiffFromDetails(msg.details); ok {
+				card.diff = diff
+				result = stripDiffTail(result)
+			}
+			card.response = parseToolResult(result)
 			m.transcript.reflow()
 		}
 		// Retire the sub-agent's status-panel row (a no-op for non-task tools whose id

@@ -51,8 +51,11 @@ func TestStreamHandlerConversion(t *testing.T) {
 	h.OnEvent(agentcore.ToolExecutionEndEvent{
 		ToolCallID: "call-1",
 		ToolName:   "read_file",
-		Result:     agentcore.AgentToolResult{Content: agentcore.ContentList{agentcore.NewTextContent("done")}},
-		IsError:    false,
+		Result: agentcore.AgentToolResult{
+			Content: agentcore.ContentList{agentcore.NewTextContent("done")},
+			Details: map[string]any{"count": 3},
+		},
+		IsError: false,
 	})
 	h.OnEvent(agentcore.TelemetryEvent{Turns: 3})
 	h.OnEvent(agentcore.CompactionEvent{Reason: "threshold"})
@@ -83,6 +86,8 @@ func TestStreamHandlerConversion(t *testing.T) {
 	}
 	if m, ok := got[4].(toolEndMsg); !ok || m.id != "call-1" || !m.ok || m.result != "done" {
 		t.Errorf("msg[4] = %#v, want toolEndMsg{ok:true, result:%q}", got[4], "done")
+	} else if dm, ok := m.details.(map[string]any); !ok || dm["count"] != 3 {
+		t.Errorf("msg[4].details = %#v, want the result's Details map", m.details)
 	}
 	if m, ok := got[5].(telemetryMsg); !ok || m.ev.Turns != 3 {
 		t.Errorf("msg[5] = %#v, want telemetryMsg{Turns:3}", got[5])

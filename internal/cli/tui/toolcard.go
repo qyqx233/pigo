@@ -13,8 +13,9 @@ import (
 // This file implements the rich tool-call card component (US-006, SPEC 3.2,
 // FR-6/7/8). A toolCard is a bordered inline block in the transcript that shows
 // a single tool invocation: a header with the tool name and a status icon
-// (running / success / warn), the decoded call arguments, and the tool's
-// response rendered as an indented tree. Cards are created on toolStartMsg,
+// (running / success / warn), the decoded call arguments, the tool's response
+// rendered as an indented tree, and - for tools that report a diff (edit,
+// #560) - a colored Diff section. Cards are created on toolStartMsg,
 // completed on toolEndMsg, and toggled between a capped and a full response view
 // with Ctrl+O (see model.go). All width math goes through ui.Width /
 // WrapToWidth / TruncateToWidth so CJK and emoji (two columns) never split.
@@ -38,13 +39,16 @@ type respNode struct {
 
 // toolCard is a single tool invocation rendered as a bordered card. input holds
 // the decoded call arguments (nil when the args were not a JSON object);
-// response is the parsed result tree, populated on completion. expanded flips
+// response is the parsed result tree, populated on completion; diff holds a
+// unified diff the tool reported in its result metadata (edit today), rendered
+// as its own colored section instead of plain response text. expanded flips
 // the response between a capped preview and the full tree.
 type toolCard struct {
 	id       string
 	name     string
 	input    map[string]any
 	response []respNode
+	diff     string
 	state    cardState
 	expanded bool
 }
@@ -52,6 +56,11 @@ type toolCard struct {
 // collapsedResponseLines is how many response lines a card shows before it is
 // expanded; past this the preview is truncated and a Ctrl+O hint is appended.
 const collapsedResponseLines = 5
+
+// collapsedDiffLines is the same cap for the Diff section. It is larger than
+// the response cap because a hunk spends lines on file headers, the @@ marker
+// and context around the actual change.
+const collapsedDiffLines = 12
 
 // statusIcon returns the header status glyph for the card's state. Running is a
 // spinner-like ellipsis, success a check, warn a bang.
@@ -82,9 +91,10 @@ func (c toolCard) styledIcon(theme Theme) string {
 
 // render draws the card at the given content width: a rounded border wrapping a
 // header (status icon + tool name), an "Input arguments" section listing the input map,
-// and a "Response" section with the tree lines. When not expanded the response
-// is capped to collapsedResponseLines with a "(Ctrl+O for more)" hint; when
-// expanded every line is shown.
+// a "Response" section with the tree lines, and - when the tool reported a diff
+// (edit) - a colored "Diff" section. When not expanded the response is capped
+// to collapsedResponseLines (the diff to collapsedDiffLines) with a
+// "(Ctrl+O for more)" hint; when expanded every line is shown.
 func (c toolCard) render(theme Theme, width int) string {
 	if width < 4 {
 		width = 4
@@ -126,6 +136,22 @@ func (c toolCard) render(theme Theme, width int) string {
 		for _, n := range resp {
 			indent := strings.Repeat("  ", n.depth)
 			lines = append(lines, theme.ToolBody.Render(WrapToWidth(indent+n.text, inner)))
+		}
+		if truncated {
+			lines = append(lines, theme.System.Render("(Ctrl+O for more)"))
+		}
+	}
+
+	if c.diff != "" {
+		lines = append(lines, theme.ToolBody.Render("Diff"))
+		dl := strings.Split(strings.TrimRight(c.diff, "\n"), "\n")
+		truncated := false
+		if !c.expanded && len(dl) > collapsedDiffLines {
+			dl = dl[:collapsedDiffLines]
+			truncated = true
+		}
+		for _, ln := range dl {
+			lines = append(lines, diffLineStyle(theme, ln).Render(WrapToWidth("  "+ln, inner)))
 		}
 		if truncated {
 			lines = append(lines, theme.System.Render("(Ctrl+O for more)"))
@@ -175,6 +201,37 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// diffLineStyle picks the theme style for one unified-diff line, mirroring
+// ui.RenderDiffLine's compact-REPL coloring: dim file headers and context,
+// cyan @@ hunk markers, red removals, green additions.
+func diffLineStyle(theme Theme, line string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ "):
+		return theme.DiffCtx
+	case strings.HasPrefix(line, "@@"):
+		return theme.DiffHunk
+	case strings.HasPrefix(line, "-"):
+		return theme.DiffDel
+	case strings.HasPrefix(line, "+"):
+		return theme.DiffAdd
+	default:
+		return theme.DiffCtx
+	}
+}
+
+// stripDiffTail removes the trailing unified diff from a tool result text so
+// the card's Response section keeps only the summary line; the diff itself
+// renders in the colored Diff section. It cuts at the diff's "--- a/" header
+// rather than matching the exact suffix, so a result clipped mid-diff still
+// splits cleanly. The cut is only applied when the tool reported a diff
+// (card.diff != ""), so e.g. bash output of git diff is never mangled.
+func stripDiffTail(text string) string {
+	if i := strings.Index(text, "\n--- a/"); i >= 0 {
+		return text[:i+1]
+	}
+	return text
 }
 
 // parseToolResult splits a tool's textual result into response tree nodes,

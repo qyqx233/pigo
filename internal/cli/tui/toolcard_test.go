@@ -129,6 +129,151 @@ func TestModelToolCardFlow(t *testing.T) {
 	}
 }
 
+// TestToolCardDiffSection verifies a card carrying a diff renders a dedicated
+// Diff section whose lines carry the per-line theme colors: red removals,
+// green additions, cyan @@ markers, dim headers and context (#560).
+func TestToolCardDiffSection(t *testing.T) {
+	theme := DefaultTheme()
+	diff := "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+	card := toolCard{
+		name:     "edit",
+		input:    map[string]any{"path": "f.txt"},
+		response: parseToolResult("Edited f.txt (1 replacement(s))"),
+		diff:     diff,
+		state:    cardSuccess,
+	}
+	out := card.render(theme, 60)
+
+	for _, want := range []string{
+		"edit(f.txt)",
+		"Response",
+		"Edited f.txt (1 replacement(s))",
+		"Diff",
+		"--- a/f.txt",
+		"@@ -1,3 +1,3 @@",
+		"-beta",
+		"+BETA",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+	// The diff lines are styled, not plain body text.
+	for _, styled := range []string{
+		theme.DiffDel.Render("  -beta"),
+		theme.DiffAdd.Render("  +BETA"),
+		theme.DiffHunk.Render("  @@ -1,3 +1,3 @@"),
+		theme.DiffCtx.Render("  --- a/f.txt"),
+		theme.DiffCtx.Render("   alpha"),
+	} {
+		if !strings.Contains(out, styled) {
+			t.Errorf("render missing styled diff line %q\n%s", styled, out)
+		}
+	}
+}
+
+// TestToolCardDiffCollapseExpand verifies the Diff section obeys the same
+// collapse/expand behavior as the response: capped with a Ctrl+O hint when
+// collapsed, fully shown once expanded.
+func TestToolCardDiffCollapseExpand(t *testing.T) {
+	theme := DefaultTheme()
+	var b strings.Builder
+	b.WriteString("--- a/f.txt\n+++ b/f.txt\n")
+	for i := 0; i < collapsedDiffLines+3; i++ {
+		b.WriteString("+line\n")
+	}
+	card := toolCard{
+		name:     "edit",
+		response: parseToolResult("Edited f.txt (1 replacement(s))"),
+		diff:     b.String(),
+		state:    cardSuccess,
+	}
+
+	collapsed := card.render(theme, 60)
+	if !strings.Contains(collapsed, "(Ctrl+O for more)") {
+		t.Errorf("collapsed card should show Ctrl+O hint\n%s", collapsed)
+	}
+	// The cap counts all diff lines, so the 2 header lines leave room for
+	// collapsedDiffLines-2 additions.
+	if got := strings.Count(collapsed, "+line"); got != collapsedDiffLines-2 {
+		t.Errorf("collapsed card shows %d additions, want %d\n%s", got, collapsedDiffLines-2, collapsed)
+	}
+
+	card.expanded = true
+	expanded := card.render(theme, 60)
+	if strings.Contains(expanded, "(Ctrl+O for more)") {
+		t.Errorf("expanded card should not show Ctrl+O hint\n%s", expanded)
+	}
+	if got := strings.Count(expanded, "+line"); got != collapsedDiffLines+3 {
+		t.Errorf("expanded card shows %d additions, want %d\n%s", got, collapsedDiffLines+3, expanded)
+	}
+}
+
+// TestStripDiffTail verifies the response text keeps only its summary once the
+// diff moves to its own section: the cut happens at the diff header, and a
+// text without a diff passes through untouched.
+func TestStripDiffTail(t *testing.T) {
+	diff := "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+BETA\n"
+	text := "Edited f.txt (1 replacement(s))\n" + diff
+	if got := stripDiffTail(text); got != "Edited f.txt (1 replacement(s))\n" {
+		t.Errorf("stripDiffTail = %q, want the summary line only", got)
+	}
+	// A result clipped mid-diff still splits at the header.
+	if got := stripDiffTail(text[:len(text)-5]); got != "Edited f.txt (1 replacement(s))\n" {
+		t.Errorf("stripDiffTail on clipped text = %q, want the summary line only", got)
+	}
+	// Text without a diff header is left alone.
+	plain := "done\nsome output\n"
+	if got := stripDiffTail(plain); got != plain {
+		t.Errorf("stripDiffTail on plain text = %q, want unchanged", got)
+	}
+}
+
+// TestModelToolEndDiff drives a tool start/end pair whose end event carries
+// edit-style Details, and verifies the model stores the diff on the card and
+// keeps only the summary in the response (no duplicated diff).
+func TestModelToolEndDiff(t *testing.T) {
+	m := NewModel(Options{})
+	next, _ := m.Update(toolStartMsg{id: "e1", name: "edit", input: map[string]any{"path": "f.txt"}})
+	mm := next.(Model)
+
+	diff := "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+BETA\n"
+	details := map[string]any{"path": "f.txt", "replacements": 1, "diff": diff}
+	next, _ = mm.Update(toolEndMsg{
+		id:      "e1",
+		ok:      true,
+		result:  "Edited f.txt (1 replacement(s))\n" + diff,
+		details: details,
+	})
+	mm = next.(Model)
+
+	card, ok := mm.toolCards["e1"]
+	if !ok {
+		t.Fatalf("toolEndMsg should keep the card")
+	}
+	if card.diff != diff {
+		t.Errorf("card.diff = %q, want the diff from Details", card.diff)
+	}
+	if len(card.response) != 1 || card.response[0].text != "Edited f.txt (1 replacement(s))" {
+		t.Errorf("card.response = %+v, want only the summary line", card.response)
+	}
+
+	// Without Details the card renders as before: full text, no diff section.
+	next, _ = m.Update(toolStartMsg{id: "e2", name: "edit"})
+	mm = next.(Model)
+	next, _ = mm.Update(toolEndMsg{id: "e2", ok: true, result: "Edited g.txt (1 replacement(s))\n" + diff})
+	mm = next.(Model)
+	card2 := mm.toolCards["e2"]
+	if card2.diff != "" {
+		t.Errorf("card without Details should carry no diff, got %q", card2.diff)
+	}
+	if len(card2.response) == 1 && card2.response[0].text == "Edited g.txt (1 replacement(s))" {
+		// The response keeps the embedded diff text when there is no Details to
+		// split on, so more than the summary should be present.
+		t.Errorf("response should keep the embedded diff when Details is absent: %+v", card2.response)
+	}
+}
+
 // TestModelCtrlOTogglesExpanded verifies Ctrl+O flips the most-recent card's
 // expanded flag so more response lines become visible.
 func TestModelCtrlOTogglesExpanded(t *testing.T) {
