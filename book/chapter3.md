@@ -372,13 +372,13 @@ ShouldStopAfterTurn func(ctx context.Context, agentCtx *agentcore.AgentContext) 
 type BeforeToolCallFunc func(ctx context.Context, call AgentToolCall) *BeforeToolCallDecision
 ```
 
-有意思的是，pigo 里真正**用**这些钩子的地方，大多在测试里（`loop_test.go`、`faux_provider_test.go`），而两个生产驱动器反而克制。看 REPL 的 `streamRun`（`cmd/pigo/repl.go`），它拼的 `RunConfig` 只挂了一个钩子：
+有意思的是，pigo 里真正**用**这些钩子的地方，大多在测试里（`loop_test.go`、`faux_provider_test.go`），而两个生产驱动器反而克制。看 REPL 的 `streamRun`（`internal/cli/repl/repl.go`），它拼的 `RunConfig` 只挂了一个钩子：
 
 ```go
 Batch: agenttool.BatchConfig{
     ToolExecutorConfig: agenttool.ToolExecutorConfig{
         Registry:       deps.reg,
-        BeforeToolCall: trustBeforeToolCall(deps.trust, deps.cwd, deps.in, out, deps.confirmMu),
+        BeforeToolCall: beforeToolCall(deps, out),
     },
 },
 ```

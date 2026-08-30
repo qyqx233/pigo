@@ -217,7 +217,7 @@ func (s *Store) AppendBranch(header SessionHeader, parentLeafID string, messages
 }
 ```
 
-它把新消息作为一条链挂在 `parentLeafID` 之下，保留文件里所有既有 entry（也就保住了其他分支），返回新叶子的 id 供调用方追踪当前活动分支。无论是无头运行收尾时的 `headlessSession.persist`（`cmd/pigo/headless_session.go`），还是 REPL 每轮结束时的 `persistTurn`（`cmd/pigo/repl.go`），走的都是这条路——它们各自维护一个 `curLeaf` 游标和一个 `persisted` 计数，每轮只把 `Messages[persisted:]` 这段新消息作为一条分支追加下去。这就是为什么在 REPL 里切回一条历史消息再继续，长出来的是一条真正的兄弟支线，而不是把后面的历史截断覆盖。
+它把新消息作为一条链挂在 `parentLeafID` 之下，保留文件里所有既有 entry（也就保住了其他分支），返回新叶子的 id 供调用方追踪当前活动分支。无论是无头运行收尾时的 `headlessSession.persist`（`internal/cli/headless/session.go`），还是 REPL 每轮结束时的 `cli.PersistTurn`（`internal/cli/persist.go`），走的都是这条路——它们各自维护一个 `curLeaf` 游标和一个 `persisted` 计数，每轮只把 `Messages[persisted:]` 这段新消息作为一条分支追加下去。这就是为什么在 REPL 里切回一条历史消息再继续，长出来的是一条真正的兄弟支线，而不是把后面的历史截断覆盖。
 
 <!--
 生图prompt：
@@ -240,7 +240,7 @@ Constraints: One image explains only one core structure. Main subject 40%-60% of
 -->
 ![图7-4 续接历史长出兄弟支线](images/fig7-4.png){#fig:7-4 width=100%}
 
-顺带一提，`persistTurn` 在无新消息时会**刻意什么都不做**，而不是重写文件——因为 `Save` 会重新生成 entry id 并拍平树，那会让 `curLeaf` 失效、丢掉其他分支。这个"没变化就别乱动"的克制，是树形结构能稳住的前提。
+顺带一提，`PersistTurn` 在无新消息时会**刻意什么都不做**，而不是重写文件——因为 `Save` 会重新生成 entry id 并拍平树，那会让 `curLeaf` 失效、丢掉其他分支。这个"没变化就别乱动"的克制，是树形结构能稳住的前提。
 
 `List` 是列会话的读方法，它只读每个文件的头一行（`loadHeader`，列表场景下很便宜），按 `UpdatedAt` 降序排、最近用的排在前面。它对损坏文件的处理同样是"跳过而非失败"：一个解析不了的会话被略过，不会连累整个列表都列不出来。
 
@@ -443,7 +443,7 @@ grep -c 'http://\|https://' /tmp/pigo-exp-7-1/out.html  # 期望 0：无外部�
 ## 思考题
 
 1. `Entry` 为什么要区分"会话 id"（`NewID`，时间序）与"entry id"（`newEntryID`，随机）两套标识？如果 entry id 也改用时间序的 uuidv7，会带来什么好处与代价？
-2. `AppendBranch` 与 `Append` 都能往会话追加消息，但 `persistTurn` 在无新消息时刻意不调用 `Save` 重写文件。对照 `writeSession`（重新生成 id、拍平树）与 `SaveEntries`（保留 id），说说为什么"没变化就重写"会破坏树形结构。
+2. `AppendBranch` 与 `Append` 都能往会话追加消息，但 `PersistTurn` 在无新消息时刻意不调用 `Save` 重写文件。对照 `writeSession`（重新生成 id、拍平树）与 `SaveEntries`（保留 id），说说为什么"没变化就重写"会破坏树形结构。
 3. `readSession` 遇到缺失父节点时选择"停在最后一个能解析的祖先"而不是报错，`List` 遇到损坏文件选择跳过而不是失败。这种"尽量少失败"的取舍在会话持久化场景下有什么价值？它在什么情况下反而可能掩盖问题？
 4. `WriteHTML` 坚持"无脚本、无外部资源、全文转义"。如果为了更好看而引入一个外部 CSS 框架或一段折叠交互的 JavaScript，会各自引入哪些新风险？（提示：想想一份会话可能来自不可信来源。）
 5. `Fork` 通过复制到全新文件实现两条支线的完全隔离。设想改成"同一文件内多分支共存"（其实 `AppendBranch` 已支持），对照两种方案在隔离性、磁盘占用、以及"误删一条支线会不会波及另一条"上的差异。

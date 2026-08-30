@@ -42,10 +42,10 @@
 
 ### 第 1 章 CLI 装配与运行架构
 
-- 关键文件：`cmd/pigo/main.go`、`cmd/pigo/run.go`、`cmd/pigo/repl.go`、`cmd/pigo/interactive.go`、
-  `cmd/pigo/baseurl.go`、`cmd/pigo/color.go`、`internal/runtime/config.go`、`internal/runtime/headless.go`。
+- 关键文件：`cmd/pigo/main.go`、`internal/cli/run/run.go`、`internal/cli/repl/repl.go`、`internal/cli/repl/interactive.go`、
+  `internal/cli/headless/headless.go`、`internal/cli/headless/session.go`、`internal/runtime/headless.go`。
 - 参数解析（pflag）、`--model`/Provider 解析、API Key 环境变量注入。
-- 三种运行模式：headless print 模式、`stream-json` 事件模式、交互式 REPL。
+- 运行模式：headless print 模式、`stream-json` 事件模式、交互式 TUI/REPL。
 - Provider 与工具注册表在启动期的装配顺序。
 
 ### 第 2 章 agentcore 抽象
@@ -96,13 +96,13 @@
 
 ### 第 8 章 项目信任与安全
 
-- 关键文件：`internal/trust/manager.go`、`cmd/pigo/trust.go`。
+- 关键文件：`internal/trust/manager.go`、`internal/trust/interactive.go`。
 - 首次进入项目目录的信任决策流程。
 - 受信状态的持久化与在 CLI 中的呈现，作为执行 Bash/工具前的安全闸门。
 
 ### 第 9 章 子 Agent 编排
 
-- 关键文件：`internal/runtime/subagent.go`、`cmd/pigo/subagent_rpc.go`、
+- 关键文件：`internal/runtime/subagent.go`、`internal/cli/headless/subagent_rpc.go`、
   `internal/jsonrpc/message.go`、`internal/jsonrpc/transport.go`。
 - 进程隔离的子 Agent：`pigo --subagent-rpc` 子进程侧。
 - 基于 JSON-RPC 2.0 over stdio 的父子通信：`subagent/run` 请求与结果回传。
@@ -113,7 +113,7 @@
 - 关键文件：`internal/runtime/skills.go`、`internal/runtime/slashcommand.go`、
   `internal/plugin/plugin.go`、`manager.go`、`manifest.go`、`events.go`、
   `internal/pkgmgr/install.go`、`fetch.go`、`distribute.go`、`classify.go`、`lockfile.go`、`ref.go`、
-  `cmd/pigo/pkgcmd.go`（Skills/包相关子命令散见于 `cmd/pigo/run.go`、`repl.go`、`interactive.go`）。
+  `internal/cli/pkgcmd/pkgcmd.go`、`internal/cli/prompts/registry.go`。
 - Skills 与斜杠命令：把领域能力挂载进 Agent。
 - Plugin 清单、管理器与事件系统。
 - 包管理器：拉取、分类、分发与锁文件，让 Skills/Prompts/Themes 可安装可复用。

@@ -6,7 +6,7 @@
 
 这一层要同时解决两个层次的差异。往上，它要给循环一个统一的、协议无关的接口：不管背后说的是哪套线上协议，循环拿到的都是同一套 `AssistantMessageEvent` 增量流。往下，它要吃掉真实世界里五花八门的差异——OpenAI 风格的 Chat Completions 与 Anthropic 的 Messages 是两套完全不同的 SSE 事件序列；三十多个内置 Provider 各有各的默认端点、鉴权头与环境变量；Azure、Bedrock、Vertex、Cloudflare 这几个还得从多个环境变量拼出端点来。
 
-本章沿着"从契约到线缆"的顺序解剖这一层：先看统一的 `Provider` 接口与它那套**双失败模型**（决定了错误到底是"返回"还是"随流而下"）；再看两套协议各自的**有状态解码器**如何把线上字节流累积成一条助手消息；接着钻进**共享传输驱动**，看它如何用一套 HTTP + SSE + 重试 + 双看门狗的机制服务所有 Provider；最后回到装配层，看**注册表、精选目录与鉴权**如何把"用户想用哪个模型"翻译成"哪个驱动、说哪套协议、拿哪个密钥"。第 1 章里一笔带过的 `resolveProvider`，到这里会补齐它下游的全部细节。
+本章沿着"从契约到线缆"的顺序解剖这一层：先看统一的 `Provider` 接口与它那套**双失败模型**（决定了错误到底是"返回"还是"随流而下"）；再看两套协议各自的**有状态解码器**如何把线上字节流累积成一条助手消息；接着钻进**共享传输驱动**，看它如何用一套 HTTP + SSE + 重试 + 双看门狗的机制服务所有 Provider；最后回到装配层，看**注册表、精选目录与鉴权**如何把"用户想用哪个模型"翻译成"哪个驱动、说哪套协议、拿哪个密钥"。第 1 章里一笔带过的 `provider.ResolveProvider`，到这里会补齐它下游的全部细节。
 
 ## 统一契约：StreamFn 与双失败模型
 
@@ -198,7 +198,7 @@ func StreamFnFromProvider(p Provider) StreamFn {
 }
 ```
 
-第 1 章 `newRunConfig` 里那句 `Stream: provider.StreamFnFromProvider(prov)` 到这里终于闭环：装配期把一个具体 `Provider` 适配成循环要的 `StreamFn`，因为两者失败模型完全一致，适配就是一次朴素的转发，把三个参数塞进一个 `CompletionRequest` 结构体而已。
+第 1 章 `run.NewConfig` 里那句 `Stream: provider.StreamFnFromProvider(prov)` 到这里终于闭环：装配期把一个具体 `Provider` 适配成循环要的 `StreamFn`，因为两者失败模型完全一致，适配就是一次朴素的转发，把三个参数塞进一个 `CompletionRequest` 结构体而已。
 
 接口里还藏着一个协议无关的元数据类型 `Model`，它让循环与 UI 能在"不知道背后是哪个 Provider"的前提下推理一个模型的能力：
 
@@ -785,7 +785,7 @@ type openAICompatPreset struct {
 }
 ```
 
-于是 `NewOpenRouterProvider`（参照级网关，带 OpenRouter 的归属头）、`NewOllamaProvider`（本地、免鉴权）、`NewNvidiaProvider`（托管 NIM、Bearer）、`NewOpenAICompatibleProvider`（`--protocol=openai` 的目标，无默认端点、中性名 `openai`）都只是往这张表填不同参数。Anthropic 系同理由 `newAnthropicCompat` 收敛，`anthropicAuthHeaderFor` 按注册表里的 `AuthScheme` 返回对应的鉴权头设置函数——`AuthBearer` 走 `Authorization: Bearer`，其余（含 `x-api-key`）走 `x-api-key` + `anthropic-version` 头。第 1 章那个 `resolveNamedProvider` 调用的就是这批构造器。
+于是 `NewOpenRouterProvider`（参照级网关，带 OpenRouter 的归属头）、`NewOllamaProvider`（本地、免鉴权）、`NewNvidiaProvider`（托管 NIM、Bearer）、`NewOpenAICompatibleProvider`（`--protocol=openai` 的目标，无默认端点、中性名 `openai`）都只是往这张表填不同参数。Anthropic 系同理由 `newAnthropicCompat` 收敛，`anthropicAuthHeaderFor` 按注册表里的 `AuthScheme` 返回对应的鉴权头设置函数——`AuthBearer` 走 `Authorization: Bearer`，其余（含 `x-api-key`）走 `x-api-key` + `anthropic-version` 头。第 1 章那个 `ResolveNamedProvider` 调用的就是这批构造器。
 
 ## 注册表、精选目录与鉴权
 
@@ -853,11 +853,11 @@ type PresetModel struct {
 
 > The naive prefix-based mapping (ollama/…) still works for arbitrary ids; the preset catalog is the "menu" of vetted choices surfaced to the user.
 
-也就是说，精选目录不是**唯一**能用的模型清单——任意合法 id 通过前缀启发式仍然能跑（第 1 章 `resolveProvider` 里 `ollama/`、`nvidia/` 前缀那段）；精选目录只是把"经过筛选、拿来即用"的组合摆到用户面前。`LookupPreset(id)` 把一个选中的 id 反查回它的归属 Provider——第 1 章 `resolveProvider` 优先级链里"先查精选目录"那一步，查的就是这里。同样地，精选目录也不带任何密钥。
+也就是说，精选目录不是**唯一**能用的模型清单——任意合法 id 通过前缀启发式仍然能跑（第 1 章 `provider.ResolveProvider` 里 `ollama/`、`nvidia/` 前缀那段）；精选目录只是把"经过筛选、拿来即用"的组合摆到用户面前。`LookupPreset(id)` 把一个选中的 id 反查回它的归属 Provider——第 1 章 `provider.ResolveProvider` 优先级链里"先查精选目录"那一步，查的就是这里。同样地，精选目录也不带任何密钥。
 
 ### 鉴权：三层凭据解析
 
-`internal/provider/auth.go` 的 `CredentialStore` 负责回答最后一个问题——密钥从哪来。它满足第 1 章 `newRunConfig` 里 `GetAPIKey: creds.GetAPIKey` 那个 `func(ctx, provider) string` 的形状，让循环能按 Provider 名**惰性**取密钥。解析分三层，`GetAPIKey` 的顺序写得清清楚楚：
+`internal/provider/auth.go` 的 `CredentialStore` 负责回答最后一个问题——密钥从哪来。它满足第 1 章 `run.NewConfig` 里 `GetAPIKey: creds.GetAPIKey` 那个 `func(ctx, provider) string` 的形状，让循环能按 Provider 名**惰性**取密钥。解析分三层，`GetAPIKey` 的顺序写得清清楚楚：
 
 ```go
 func (c *CredentialStore) GetAPIKey(ctx context.Context, provider string) string {
@@ -973,7 +973,7 @@ if strings.TrimSpace(env("AWS_BEARER_TOKEN_BEDROCK")) == "" {
 
 如果用户设了 `AWS_PROFILE` 或静态 AK/SK，它检测得到，并回一条明确的错误：告诉你"我看到你的 AWS 凭据了，但 SigV4 还没实现，请改用 bearer token"，而不是抛一个让人摸不着头脑的鉴权失败。把未实现的能力做成一条可操作的提示，比默默失败友好得多，这个细节值得抄进自己的代码。
 
-这样，第 1 章 `resolveProvider` 那条优先级链的下游就全部补齐了：`--provider` 命中特殊鉴权 Provider 时走 `ResolveSpecialProvider`（本节），普通 Provider 走标准构造器（上一节），`--protocol` 直接构造对应协议驱动，都没有时回落到精选目录与前缀启发式，最终默认落到 OpenRouter。整条链从用户输入一路走到"一个可以直接发流式请求的 `Provider` 对象"。
+这样，第 1 章 `provider.ResolveProvider` 那条优先级链的下游就全部补齐了：`--provider` 命中特殊鉴权 Provider 时走 `ResolveSpecialProvider`（本节），普通 Provider 走标准构造器（上一节），`--protocol` 直接构造对应协议驱动，都没有时回落到精选目录与前缀启发式，最终默认落到 OpenRouter。整条链从用户输入一路走到"一个可以直接发流式请求的 `Provider` 对象"。
 
 ## 实验 4-1 ★：观察双失败模型与 SSE 解析 {.unnumbered}
 
@@ -1025,7 +1025,7 @@ go test ./internal/provider/ -run 'Decoder' -v
 - **两种驱动**：`openAICompatDriver` 与 `anthropicCompatDriver`（`providers.go`）把请求编码成对应线上格式、配对应解码器、交给共享传输层；构造器收敛到一张 preset 表，`checkImageSupport` 把"模型看不见图"变成显式错误。
 - **注册表、精选目录与鉴权**：`registry.go` 是内置 Provider 元数据的唯一真相源（只存环境变量名，不存密钥）；`presets.go` 是给人看的推荐菜单；`auth.go` 的 `CredentialStore` 按 OAuth → 覆盖 → 环境变量 → 配置文件三层解析密钥；`special_auth.go` 为 Azure/Bedrock/Vertex/Cloudflare 校验多参数并拼出端点，缺参数时精确点名、绝不泄漏 secret。
 
-第 1 章一笔带过的 `resolveProvider`，到这里补齐了它下游的全部细节：从"用户想用哪个模型"一路走到"一个能直接发流式请求的 `Provider`"。下一章转向工具系统，看模型决定调用工具之后，循环如何在信任闸门的把关下把这些调用批量执行、再回填进上下文。
+第 1 章一笔带过的 `provider.ResolveProvider`，到这里补齐了它下游的全部细节：从"用户想用哪个模型"一路走到"一个能直接发流式请求的 `Provider`"。下一章转向工具系统，看模型决定调用工具之后，循环如何在信任闸门的把关下把这些调用批量执行、再回填进上下文。
 
 ## 思考题
 

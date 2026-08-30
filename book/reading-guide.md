@@ -45,9 +45,9 @@ Constraints: One image explains only one core structure. Main subject 40%-60% of
 
 > 交棒：把"用哪个模型、带哪些工具、系统提示是什么"这些散落的意图，收敛成一个 `RunConfig`，交给下一站装配。
 
-**② 装配一次运行 —— `cmd/pigo` + `internal/provider` ﹝第 1、4 章﹞**
+**② 装配一次运行 —— `internal/cli` + `internal/provider` ﹝第 1、4 章﹞**
 
-`newRunConfig` 是"一次运行如何接线"的唯一定义。它在这里把三样东西装到位：解析出的 Provider（比如根据 `--model` 落到某个 OpenAI 兼容网关，见 ﹝第 4 章﹞ 的 `resolveProvider`）、注册好的工具集（`read`/`write`/`bash`… 见 ﹝第 5 章﹞）、以及拼好的系统提示。
+`run.NewConfig` 是"一次运行如何接线"的唯一定义。它在这里把几样东西装到位：解析出的 Provider（比如根据 `--model` 落到某个 OpenAI 兼容网关，见 ﹝第 4 章﹞ 的 `provider.ResolveProvider`）、注册好的工具集（`read`/`write`/`bash`… 见 ﹝第 5 章﹞）、以及拼好的系统提示——这些都由 `internal/cli/run` 的 `run.SetupEnv` 一次性备齐。
 
 > 交棒：装配完成，控制权沿 `StartRun` 交给运行时——**从这里开始，就是 Agent 循环的地盘了。**
 

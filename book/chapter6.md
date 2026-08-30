@@ -477,7 +477,7 @@ func runCompaction(ctx context.Context, msgs agentcore.MessageList, cfg *RunConf
 
 注意它传的 `prevCompactionIndex` 是 -1、`prevDetails` 与 `previousSummary` 都为空——当前循环里的自动压缩每次都走首次摘要模板，把当前消息列表里从头到切点的那段（若上一轮压过，这段的开头就是那条检查点消息）当作待总结的范围。迭代式压缩所需的那几个参数在包层已经备好，为将来更精细的滚动压缩留了接口。
 
-除了自动触发，用户也能手动压缩。交互式 REPL 里的 `/compact` 命令（`cmd/pigo/repl.go` 的 `runManualCompact`）直接调 `compaction.Compact`，用当前 Provider/模型生成摘要，替换共享上下文，并把"压缩前后的 token 数、总结了多少条、保留了多少条"打印出来。它和自动压缩走的是同一套 `Compact` + `RebuildContext`，只是触发时机由人决定、结果打到终端而非事件流。
+除了自动触发，用户也能手动压缩。交互式 REPL 里的 `/compact` 命令（`internal/cli/repl/repl.go` 的 `runManualCompact`）直接调 `compaction.Compact`，用当前 Provider/模型生成摘要，替换共享上下文，并把"压缩前后的 token 数、总结了多少条、保留了多少条"打印出来。它和自动压缩走的是同一套 `Compact` + `RebuildContext`，只是触发时机由人决定、结果打到终端而非事件流。
 
 ## 实验 6-1 ★：亲眼看着上下文被压回窗口内 {.unnumbered}
 

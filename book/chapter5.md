@@ -62,7 +62,7 @@ type AgentToolResult struct {
 
 ## 注册表：按名登记与 Schema 校验
 
-工具集在启动期由 `builtinTools`（`cmd/pigo/main.go`）构造，再逐个塞进注册表。注册表 `ToolRegistry`（`internal/agenttool/registry.go`）干两件事：按名字存放工具、按每个工具声明的 JSON Schema 校验调用参数。
+工具集在启动期由 `run.BuiltinTools`（`internal/cli/run/run.go`）构造，再逐个塞进注册表。注册表 `ToolRegistry`（`internal/agenttool/registry.go`）干两件事：按名字存放工具、按每个工具声明的 JSON Schema 校验调用参数。
 
 ```go
 type ToolRegistry struct {
@@ -779,7 +779,7 @@ func (s *TodoStore) Set(items []TodoItem) {
 }
 ```
 
-`Set` 里的 `append(s.items[:0:0], items...)` 是一个惯用法：`[:0:0]` 把长度和容量都截成 0，强制 `append` 分配新底层数组，从而**深拷贝**一份，避免和调用方共享切片。为什么要加锁？因为这个工具可能在批量执行里跑（虽然它声明为串行，但 REPL 的渲染器可能同时来读清单），读写要互斥。这个 store 在 `builtinTools` 里被创建一次、由唯一的 `TodoTool` 实例持有，所以一次运行内清单会一直累积、后一次写替换前一次。
+`Set` 里的 `append(s.items[:0:0], items...)` 是一个惯用法：`[:0:0]` 把长度和容量都截成 0，强制 `append` 分配新底层数组，从而**深拷贝**一份，避免和调用方共享切片。为什么要加锁？因为这个工具可能在批量执行里跑（虽然它声明为串行，但 REPL 的渲染器可能同时来读清单），读写要互斥。这个 store 在 `run.BuiltinTools` 里被创建一次、由唯一的 `TodoTool` 实例持有，所以一次运行内清单会一直累积、后一次写替换前一次。
 
 `Execute` 先逐项校验（内容非空、状态合法），存进 store，再渲染成一个复选框进度块返回。渲染逻辑在 `RenderTodoList`：
 

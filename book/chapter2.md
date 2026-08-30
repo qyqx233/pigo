@@ -262,7 +262,7 @@ type ImageContent struct {
 }
 ```
 
-`Data` 是 base64 编码的图像数据，配 `MimeType` 说明格式。第1章无头模式里那个 `buildUserContent`"支持图片引用"，产出的正是把图片读成 `ImageContent` 塞进用户消息的 `ContentList`。
+`Data` 是 base64 编码的图像数据，配 `MimeType` 说明格式。第1章无头模式里那个 `ui.BuildUserContent`"支持图片引用"，产出的正是把图片读成 `ImageContent` 塞进用户消息的 `ContentList`。
 
 四个变体各自实现空的 `isContent()` 完成密封，然后 pigo 给每种块配了一个构造函数，全部替调用方把 `Type` 判别字段填好，杜绝"手写结构体时忘了设 type"这类错位：
 
@@ -458,7 +458,7 @@ func (s *EventStream[T, R]) Emit(ctx context.Context, event T) error {
 
 ## 工具抽象：AgentTool 契约
 
-Agent 能"动手"，靠的是工具。`tool.go` 先定义了一次 run 的输入状态 `AgentContext`——它把系统提示、消息历史、可用工具三样打包，正是第1章 `newRunConfig` 之外、真正喂给循环的那份状态：
+Agent 能"动手"，靠的是工具。`tool.go` 先定义了一次 run 的输入状态 `AgentContext`——它把系统提示、消息历史、可用工具三样打包，正是第1章 `run.NewConfig` 之外、真正喂给循环的那份状态：
 
 ```go
 type AgentContext struct {
@@ -522,7 +522,7 @@ type AgentToolResult struct {
 type PrepareArgumentsFunc func(ctx context.Context, toolName string, args json.RawMessage) (json.RawMessage, error)
 ```
 
-**执行前** 钩子在校验之后跑，可以拦下这次调用——这正是第1章 REPL 里 `BeforeToolCall: trustBeforeToolCall(...)` 那个信任闸门的类型：
+**执行前** 钩子在校验之后跑，可以拦下这次调用——这正是第1章 REPL 里 `BeforeToolCall: beforeToolCall(...)` 那个信任闸门的类型（接线在 `internal/cli/repl`，实现在 `internal/trust` 的 `BeforeToolCall`）：
 
 ```go
 type BeforeToolCallDecision struct {

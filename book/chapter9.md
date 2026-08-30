@@ -27,7 +27,7 @@ Constraints: One image explains only one core structure. Main subject 40%-60% of
 -->
 ![图9-1 派出分身消化噪声](images/fig9-1.png){#fig:9-1 width=100%}
 
-本章的重点不在"子 Agent 是什么"，而在 pigo 给它准备的第二种活法：**进程隔离**。父进程可以不在自己体内跑子循环，而是 fork 出一个全新的 `pigo` 子进程，通过 stdio 上的 JSON-RPC 把这次运行委派出去。我们会顺着这条链走完：先看两种隔离模式如何在一个 `SubAgentSpec` 里选择（`internal/runtime/subagent.go`），再看父侧 `SubAgentTool` 怎么驱动子进程、子进程侧 `pigo --subagent-rpc` 怎么应答（`cmd/pigo/subagent_rpc.go`），最后拆开垫在两者之间的那层 JSON-RPC 2.0 传输（`internal/jsonrpc`）。
+本章的重点不在"子 Agent 是什么"，而在 pigo 给它准备的第二种活法：**进程隔离**。父进程可以不在自己体内跑子循环，而是 fork 出一个全新的 `pigo` 子进程，通过 stdio 上的 JSON-RPC 把这次运行委派出去。我们会顺着这条链走完：先看两种隔离模式如何在一个 `SubAgentSpec` 里选择（`internal/runtime/subagent.go`），再看父侧 `SubAgentTool` 怎么驱动子进程、子进程侧 `pigo --subagent-rpc` 怎么应答（`internal/cli/headless/subagent_rpc.go`），最后拆开垫在两者之间的那层 JSON-RPC 2.0 传输（`internal/jsonrpc`）。
 
 ## 两种隔离：goroutine 与进程
 
@@ -81,7 +81,7 @@ type SubAgentSpec struct {
 }
 ```
 
-值得停一下的是 `NewRunConfig` 和 `Process` 的分工。goroutine 模式下，子循环要的 Provider 流函数（第 4 章的 `StreamFnFromProvider`）是一个进程内的闭包——它握着 HTTP 客户端、凭据解析器，这些东西没法跨进程边界序列化传过去。所以进程模式不用 `NewRunConfig`，改用 `Process` 里那份**可序列化**的配置：父进程只把模型 id（以及可选的 base URL / protocol）递过去，让子进程用第 1 章、第 4 章讲过的同一套 `resolveProvider` 自己把 Provider 重新解析出来，凭据则从继承来的父进程环境变量里取。`SubAgentProcessConfig` 的字段正是围绕这条约束设计的：
+值得停一下的是 `NewRunConfig` 和 `Process` 的分工。goroutine 模式下，子循环要的 Provider 流函数（第 4 章的 `StreamFnFromProvider`）是一个进程内的闭包——它握着 HTTP 客户端、凭据解析器，这些东西没法跨进程边界序列化传过去。所以进程模式不用 `NewRunConfig`，改用 `Process` 里那份**可序列化**的配置：父进程只把模型 id（以及可选的 base URL / protocol）递过去，让子进程用第 1 章、第 4 章讲过的同一套 `provider.ResolveProvider` 自己把 Provider 重新解析出来，凭据则从继承来的父进程环境变量里取。`SubAgentProcessConfig` 的字段正是围绕这条约束设计的：
 
 ```go
 type SubAgentProcessConfig struct {
@@ -205,18 +205,18 @@ final, err := DrainStream(ctx, stream, h)
 
 ## 子进程侧：pigo --subagent-rpc
 
-进程模式的另一端，是被 spawn 出来的那个 `pigo`。第 1 章拆 `dispatch` 时我们见过它的四条岔路，其中第一条就是这里：
+进程模式的另一端，是被 spawn 出来的那个 `pigo`。第 1 章拆 `dispatch` 时我们见过它的五条岔路，其中第一条就是这里：
 
 ```go
 if opts.subagentRPC {
-	return runSubAgentRPC(ctx, os.Stdin, out, errOut)
+	return headless.RunSubAgentRPC(ctx, os.Stdin, out, errOut)
 }
 ```
 
-`--subagent-rpc` 是一条与交互/无头完全无关的独立模式。进入 `runSubAgentRPC`（`cmd/pigo/subagent_rpc.go`）后，它就变成一个极简的 JSON-RPC 服务器：从 stdin 逐行读请求，每行跑一次子 Agent，把结果（或错误）写到 stdout，直到 stdin 关闭才退出。
+`--subagent-rpc` 是一条与交互/无头完全无关的独立模式。进入 `headless.RunSubAgentRPC`（`internal/cli/headless/subagent_rpc.go`）后，它就变成一个极简的 JSON-RPC 服务器：从 stdin 逐行读请求，每行跑一次子 Agent，把结果（或错误）写到 stdout，直到 stdin 关闭才退出。
 
 ```go
-func runSubAgentRPC(ctx context.Context, in io.Reader, out, errOut io.Writer) int {
+func RunSubAgentRPC(ctx context.Context, in io.Reader, out, errOut io.Writer) int {
 	scanner := bufio.NewScanner(in)
 	// 子 Agent 的 prompt 可能很大；与 jsonrpc 客户端的行上限对齐。
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -267,14 +267,14 @@ Constraints: One image explains only one core structure. Main subject 40%-60% of
 单条请求的处理在 `handleSubAgentRequest` 里。它把"方法不对、参数非法、Provider 解析失败、子运行失败"统统变成 RPC 错误响应，只有成功跑完才回一个带子 Agent 文本的结果。中段是这次委派真正的装配：
 
 ```go
-prov, providerName, err := resolveProvider(params.Model, params.BaseURL, params.Protocol, "")
+prov, providerName, err := provider.ResolveProvider(params.Model, params.BaseURL, params.Protocol, "", os.Getenv)
 if err != nil {
 	writeSubAgentError(enc, req.ID, -32603, "resolve provider: "+err.Error())
 	return
 }
 cwd, _ := os.Getwd()
-tools := filterBuiltinTools(builtinTools(cwd, false), params.Tools)
-reg := toolRegistry(tools)
+tools := filterBuiltinTools(run.BuiltinTools(cwd, false), params.Tools)
+reg := run.ToolRegistry(tools)
 creds := provider.NewCredentialStore(nil) // 从环境解析
 runCfg := runtime.RunConfig{
 	LoopConfig: runtime.LoopConfig{
@@ -288,7 +288,7 @@ runCfg := runtime.RunConfig{
 text, err := runtime.RunSubAgentOnce(ctx, params.SystemPrompt, params.Prompt, tools, runCfg)
 ```
 
-把这段和第 1 章的 `newRunConfig`、`setupAgentEnv` 并排看，会发现它其实是同一套装配在子进程里的一次"重演"：用同样的 `resolveProvider` 解析 Provider，用同样的 `builtinTools` 造工具集，拼出结构一致的 `RunConfig`。区别只在于工具集被 `filterBuiltinTools` 按父进程转发来的名字裁剪过——父侧传 `ToolNames`，子侧据此重建，这就是上一节"只转发名字"约定的落地处。凭据 `NewCredentialStore(nil)` 走环境解析，取的正是父进程继承下来的那些 API Key。
+把这段和第 1 章的 `run.NewConfig`、`run.SetupEnv` 并排看，会发现它其实是同一套装配在子进程里的一次"重演"：用同样的 `provider.ResolveProvider` 解析 Provider，用同样的 `run.BuiltinTools` 造工具集，拼出结构一致的 `RunConfig`。区别只在于工具集被 `filterBuiltinTools` 按父进程转发来的名字裁剪过——父侧传 `ToolNames`，子侧据此重建，这就是上一节"只转发名字"约定的落地处。凭据 `NewCredentialStore(nil)` 走环境解析，取的正是父进程继承下来的那些 API Key。
 
 真正跑循环的是 `RunSubAgentOnce`（`internal/runtime/subagent.go`），它是进程模式与 goroutine 模式共享的执行内核：给一份解析好的 `RunConfig` 和 prompt，建一个新的子上下文，用 `StartRun` + `DrainStream` 跑到底。它对失败的处理比 goroutine 版更细一层——当循环合成了一个错误轮次（比如 Provider 连接失败），诊断信息落在 `final.ErrorMessage` 而不是 `Content` 里，所以它会回退去取 `ErrorMessage`，好让子进程把真正的病因（而非一句干巴巴的 "error" 停止原因）通过 RPC 错误上报出去。
 
@@ -412,7 +412,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"subagent/run","params":{"prompt":"你好
 {"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params: prompt and model are required"}}
 ```
 
-这正对应 `handleSubAgentRequest` 里 `params.Prompt == "" || params.Model == ""` 那道校验。子进程没有崩溃，也没有非零退出——它"以一条错误响应回答"，而这与"子进程崩溃"（父侧靠 stdout 关闭无响应来判定）是两种不同的失败，`runSubAgentRPC` 的注释特意强调了这一点。
+这正对应 `handleSubAgentRequest` 里 `params.Prompt == "" || params.Model == ""` 那道校验。子进程没有崩溃，也没有非零退出——它"以一条错误响应回答"，而这与"子进程崩溃"（父侧靠 stdout 关闭无响应来判定）是两种不同的失败，`RunSubAgentRPC` 的注释特意强调了这一点。
 
 **步骤 2**：发一条**方法名不对**的请求，观察 `-32601`（method not found）：
 
@@ -423,7 +423,7 @@ echo '{"jsonrpc":"2.0","id":2,"method":"subagent/nope","params":{}}' \
 
 **预期**：`error.code` 为 `-32601`，消息形如 `method not found: subagent/nope`。
 
-**观察点**：把这两条响应和 `cmd/pigo/subagent_rpc.go` 的 `handleSubAgentRequest` 逐行对照，你会看到一条完整的错误分层——方法不对是 `-32601`、参数非法是 `-32602`、Provider 解析失败是 `-32603`、子运行失败是自定义的 `-32000`。它们都走 `writeSubAgentError` 写成一条带 id 的错误响应，因此父侧 `Client.Call` 能把每一种都还原成一个 Go error，最终由 `executeProcess` 标记成父模型看得见的工具错误。若想再进一步，给 `params` 补上一个真实的 `model` 和环境里配好的 Key，就能看到子进程真的跑完一次循环、回一条 `result.text`——那正是一次成功委派的样子。
+**观察点**：把这两条响应和 `internal/cli/headless/subagent_rpc.go` 的 `handleSubAgentRequest` 逐行对照，你会看到一条完整的错误分层——方法不对是 `-32601`、参数非法是 `-32602`、Provider 解析失败是 `-32603`、子运行失败是自定义的 `-32000`。它们都走 `writeSubAgentError` 写成一条带 id 的错误响应，因此父侧 `Client.Call` 能把每一种都还原成一个 Go error，最终由 `executeProcess` 标记成父模型看得见的工具错误。若想再进一步，给 `params` 补上一个真实的 `model` 和环境里配好的 Key，就能看到子进程真的跑完一次循环、回一条 `result.text`——那正是一次成功委派的样子。
 
 ## 本章小结
 
@@ -431,7 +431,7 @@ echo '{"jsonrpc":"2.0","id":2,"method":"subagent/nope","params":{}}' \
 
 - **子 Agent 即工具**：一个子 Agent 是一次带独立 `AgentContext` 的完整循环，由父 Agent 通过普通工具调用启动，最终 assistant 文本回填给父循环。`SubAgentTool`（`internal/runtime/subagent.go`）把 `SubAgentSpec` 适配成 `agentcore.AgentTool`，声明为可并发。
 - **两种隔离**：`SubAgentIsolationGoroutine`（默认）在父进程内的 goroutine 里跑，轻但不隔离故障；`SubAgentIsolationProcess` spawn 一个新 `pigo` 子进程，子循环的崩溃被困在子侧、父侧感知为工具错误。进程模式只能转发可序列化配置（模型 id、工具**名字**），由子进程自行解析 Provider。
-- **子进程侧**：`pigo --subagent-rpc` 经 `dispatch` 进入 `runSubAgentRPC`（`cmd/pigo/subagent_rpc.go`），逐行读 JSON-RPC 请求，用与 CLI 一致的 `resolveProvider` + `builtinTools` 重演装配，交 `RunSubAgentOnce` 跑循环；方法/参数/Provider/子运行的各类失败分别映射成 `-32601`/`-32602`/`-32603`/`-32000` 错误码。
+- **子进程侧**：`pigo --subagent-rpc` 经 `dispatch` 进入 `headless.RunSubAgentRPC`（`internal/cli/headless/subagent_rpc.go`），逐行读 JSON-RPC 请求，用与 CLI 一致的 `provider.ResolveProvider` + `run.BuiltinTools` 重演装配，交 `RunSubAgentOnce` 跑循环；方法/参数/Provider/子运行的各类失败分别映射成 `-32601`/`-32602`/`-32603`/`-32000` 错误码。
 - **JSON-RPC 传输**：`internal/jsonrpc` 提供一套 spawn 子进程、在 stdio 上说 line-delimited JSON-RPC 2.0 的最小客户端，被 MCP、插件与子 Agent 共享。`Client.Call` 靠 id 关联响应、对并发安全；子进程崩溃表现为 stdout EOF，`readLoop` 借此 `failAll`，把它翻译成父侧的一次工具错误。
 
 从主循环到工具，再到把一次委派关进独立进程，pigo 的"内核"部分至此拆完。下一步（第 10 章）我们走向最外层：Skills、斜杠命令、Plugins 与包管理器如何让这台 Agent 可插拔地生长——而它们复用的，正是本章这套 JSON-RPC 传输地基。
@@ -439,7 +439,7 @@ echo '{"jsonrpc":"2.0","id":2,"method":"subagent/nope","params":{}}' \
 ## 思考题
 
 1. 进程模式为什么只能转发工具的**名字**、而不能像 goroutine 模式那样直接把 `Tools []agentcore.AgentTool` 传给子进程？对照 `SubAgentProcessConfig` 的注释与 `filterBuiltinTools`，说说自定义/插件工具跨不过进程边界的根本原因。
-2. `runSubAgentRPC` 把"子进程以错误响应回答"与"子进程崩溃"设计成两种可区分的失败。前者走 RPC 错误码，后者靠什么被父侧感知？（提示：看 `transport.go` 的 `readLoop` 在 stdout EOF 时做了什么。）
+2. `RunSubAgentRPC` 把"子进程以错误响应回答"与"子进程崩溃"设计成两种可区分的失败。前者走 RPC 错误码，后者靠什么被父侧感知？（提示：看 `transport.go` 的 `readLoop` 在 stdout EOF 时做了什么。）
 3. `Client.Call` 用一张 `pending` map 按 id 关联响应，因此对并发调用安全。如果子进程（服务器）把请求的数字 id 回成了字符串，响应还能被正确关联吗？`ID` 类型的哪个设计保证了这一点？
 4. goroutine 模式会把子 Agent 的流式文本经 `StreamHandler.OnText` 转成工具更新回传，进程模式却不流式、只回最终结果。这个差异来自协议限制还是实现选择？如果要让进程模式也支持流式，`subagent/run` 的响应模型需要怎么改？
 5. `defaultProcessCall` 用 `defer client.Close()` 收尾，而 `Close` 会先关 stdin、等 `closeGrace` 再强杀。设想一个子进程忽略 stdin 的 EOF、又一直不关 stdout——如果没有那个 5 秒的 grace timer，父进程会发生什么？
