@@ -4,10 +4,68 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 )
+
+func TestCustomToolAdapterToleratesConcurrentUpdates(t *testing.T) {
+	adapted, err := adaptCustomTools([]Tool{{
+		Name:   "piflow_racer",
+		Schema: json.RawMessage(`{"type":"object"}`),
+		Execute: func(_ context.Context, _ ToolCall, onUpdate func(ToolResult)) (ToolResult, error) {
+			// Publish partials from several goroutines, including one that
+			// races past the return: the adapter must serialize and drop
+			// post-return updates without a data race (run with -race).
+			var wg sync.WaitGroup
+			for i := 0; i < 4; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					onUpdate(ToolResult{Content: []ToolResultContent{{Type: ToolResultContentText, Text: strconv.Itoa(i)}}})
+				}(i)
+			}
+			wg.Wait()
+			go onUpdate(ToolResult{Content: []ToolResultContent{{Type: ToolResultContentText, Text: "late"}}})
+			return ToolResult{Content: []ToolResultContent{{Type: ToolResultContentText, Text: "done"}}}, nil
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("adaptCustomTools: %v", err)
+	}
+
+	var updates int
+	result, err := adapted[0].Execute(context.Background(), "call-1", json.RawMessage(`{}`), func(agentcore.AgentToolResult) {
+		// Invoked under the adapter's update lock, so no extra guard needed.
+		updates++
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if updates != 4 {
+		t.Fatalf("delivered updates = %d, want 4", updates)
+	}
+	if got := toolResultFromInternal(result).Content[0].Text; got != "done" {
+		t.Fatalf("result text = %q, want %q", got, "done")
+	}
+}
+
+func TestCustomToolAdapterRejectsInvalidNameRunes(t *testing.T) {
+	for _, name := range []string{"look up", "lookup✓", "lookup.done"} {
+		_, err := adaptCustomTools([]Tool{{
+			Name:   name,
+			Schema: json.RawMessage(`{"type":"object"}`),
+			Execute: func(context.Context, ToolCall, func(ToolResult)) (ToolResult, error) {
+				return ToolResult{}, nil
+			},
+		}}, nil)
+		if err == nil {
+			t.Fatalf("adaptCustomTools(%q) succeeded, want charset error", name)
+		}
+	}
+}
 
 func TestCustomToolAdapterPreservesCallUpdatesAndResult(t *testing.T) {
 	terminate := true

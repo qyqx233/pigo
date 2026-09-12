@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 )
@@ -44,7 +45,9 @@ type ToolResultContent struct {
 }
 
 // ToolResult is the result of a custom tool invocation. Details is application
-// metadata and Terminate requests early agent-loop termination when true.
+// metadata and Terminate requests early agent-loop termination when true. For
+// built-in tools surfaced through the event types, Details is tool-specific
+// metadata whose shape may change without notice.
 type ToolResult struct {
 	Content   []ToolResultContent `json:"content"`
 	Details   any                 `json:"details,omitempty"`
@@ -52,7 +55,9 @@ type ToolResult struct {
 }
 
 // ToolExecuteFunc executes a custom tool. onUpdate may be nil; when non-nil the
-// tool may synchronously publish partial results while it runs.
+// tool may publish partial results while it runs. Calls to onUpdate are safe
+// from any goroutine and are serialized by the adapter; updates published
+// after Execute returns are discarded.
 type ToolExecuteFunc func(ctx context.Context, call ToolCall, onUpdate func(ToolResult)) (ToolResult, error)
 
 // Tool defines a custom tool explicitly registered by an SDK consumer. Schema
@@ -87,11 +92,19 @@ func (t customToolAdapter) Execute(
 	args json.RawMessage,
 	onUpdate agentcore.ToolUpdateFunc,
 ) (agentcore.AgentToolResult, error) {
+	// updateMu serializes onUpdate: a custom tool may publish partials from any
+	// goroutine, so both the conversion error and the post-return cutoff must be
+	// race-free. done stops stragglers from emitting updates after Execute has
+	// returned and the loop has moved on.
+	var updateMu sync.Mutex
 	var updateErr error
+	var done bool
 	var publicUpdate func(ToolResult)
 	if onUpdate != nil {
 		publicUpdate = func(partial ToolResult) {
-			if updateErr != nil {
+			updateMu.Lock()
+			defer updateMu.Unlock()
+			if done || updateErr != nil {
 				return
 			}
 			converted, err := toolResultToInternal(partial)
@@ -108,11 +121,17 @@ func (t customToolAdapter) Execute(
 		Name:      t.tool.Name,
 		Arguments: append(json.RawMessage(nil), args...),
 	}, publicUpdate)
+
+	updateMu.Lock()
+	done = true
+	pending := updateErr
+	updateMu.Unlock()
+
 	if err != nil {
 		return agentcore.AgentToolResult{}, err
 	}
-	if updateErr != nil {
-		return agentcore.AgentToolResult{}, updateErr
+	if pending != nil {
+		return agentcore.AgentToolResult{}, pending
 	}
 	return toolResultToInternal(result)
 }
@@ -148,6 +167,13 @@ func validateAndCopyTool(tool Tool) (Tool, error) {
 	trimmed := strings.TrimSpace(tool.Name)
 	if trimmed == "" || trimmed != tool.Name {
 		return Tool{}, fmt.Errorf("custom tool name must be non-empty and have no surrounding whitespace")
+	}
+	// Match the name charset the major providers accept ([A-Za-z0-9_-]); reject
+	// at New so a model-facing request never fails on an unadvertised name.
+	for _, r := range tool.Name {
+		if !isToolNameRune(r) {
+			return Tool{}, fmt.Errorf("custom tool name %q may only contain ASCII letters, digits, underscores, and hyphens", tool.Name)
+		}
 	}
 	if tool.Execute == nil {
 		return Tool{}, fmt.Errorf("custom tool %q has no Execute function", tool.Name)
@@ -206,10 +232,19 @@ func toolResultFromInternal(result agentcore.AgentToolResult) ToolResult {
 	}
 }
 
+func isToolNameRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		return true
+	default:
+		return false
+	}
+}
+
 func cloneBool(value *bool) *bool {
 	if value == nil {
 		return nil
 	}
-	copy := *value
-	return &copy
+	cloned := *value
+	return &cloned
 }

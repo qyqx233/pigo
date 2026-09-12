@@ -27,7 +27,11 @@ type Event interface {
 	isEvent()
 }
 
-// MessageDeltaEvent carries only newly appended assistant text.
+// MessageDeltaEvent carries only newly appended assistant text. Deltas are
+// best-effort appends: if a provider replaces already-streamed text, the
+// replacement is re-emitted in full as a new delta, so concatenating deltas
+// can repeat text. Treat [MessageEndEvent.Text] as authoritative for the
+// complete message text.
 type MessageDeltaEvent struct {
 	Text string `json:"text"`
 }
@@ -49,7 +53,9 @@ type ToolExecutionStartEvent struct {
 	Arguments  json.RawMessage `json:"arguments"`
 }
 
-// ToolExecutionUpdateEvent carries a partial custom-tool result.
+// ToolExecutionUpdateEvent carries a partial tool result published while a
+// tool runs. The executor offers this channel to built-in tools as well as
+// custom ones, so the event may fire for any tool that streams partials.
 type ToolExecutionUpdateEvent struct {
 	ToolCallID string     `json:"toolCallId"`
 	ToolName   string     `json:"toolName"`

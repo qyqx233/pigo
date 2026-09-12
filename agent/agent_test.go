@@ -223,6 +223,8 @@ func TestInvalidCustomToolsFailConstruction(t *testing.T) {
 	}{
 		{name: "blank name", edit: func(tool *agent.Tool) { tool.Name = "" }},
 		{name: "surrounding whitespace", edit: func(tool *agent.Tool) { tool.Name = " lookup " }},
+		{name: "internal whitespace", edit: func(tool *agent.Tool) { tool.Name = "look up" }},
+		{name: "non ascii name", edit: func(tool *agent.Tool) { tool.Name = "lookup✓" }},
 		{name: "nil execute", edit: func(tool *agent.Tool) { tool.Execute = nil }},
 		{name: "invalid schema", edit: func(tool *agent.Tool) { tool.Schema = json.RawMessage(`{"type":`) }},
 		{name: "non object schema", edit: func(tool *agent.Tool) { tool.Schema = json.RawMessage(`[]`) }},

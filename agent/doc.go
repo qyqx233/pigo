@@ -52,12 +52,11 @@
 // # Conversation state
 //
 // A [Session] keeps the running conversation: each [Session.Prompt],
-// [Session.Stream], or [Session.StreamEvents] call appends to the same history,
-// so follow-up prompts see
-// what came before. Call [Session.Reset] to start a fresh conversation on the
-// same session, or [Session.Close] when you are done. A Session is NOT safe for
-// concurrent use — drive it from one goroutine, or create one Session per
-// goroutine.
+// [Session.Stream], or [Session.StreamEvents] call appends to the same
+// history, so follow-up prompts see what came before. Call [Session.Reset] to
+// start a fresh conversation on the same session, or [Session.Close] when you
+// are done. A Session is NOT safe for concurrent use — drive it from one
+// goroutine, or create one Session per goroutine.
 //
 // # Defaults
 //
