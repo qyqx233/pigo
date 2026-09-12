@@ -87,12 +87,17 @@ func TestLookupPresetNewEntries(t *testing.T) {
 		provider string
 	}{
 		{"deepseek-v4-pro", "deepseek"},
+		{"deepseek-flash", "deepseek"},
 		{"llama-3.3-70b-versatile", "groq"},
 		{"grok-4.5", "xai"},
 		{"zai-glm-4.7", "cerebras"},
 		{"mistral-large-latest", "mistral"},
 		{"kimi-k2-thinking", "moonshotai"},
 		{"glm-5.1", "zai"},
+		{"glm-5.3", "zai"},
+		{"glm-5.3-flash", "zai"},
+		{"claude-fable-5", "anthropic"},
+		{"claude-fable-5-1", "anthropic"},
 		{"accounts/fireworks/models/gpt-oss-120b", "fireworks"},
 		{"deepseek-ai/DeepSeek-V4-Pro", "together"},
 		{"MiniMax-M3", "minimax"},

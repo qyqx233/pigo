@@ -219,7 +219,7 @@ pigo -a -p "运行 go test ./... 并修复失败的用例"
 
 | 模型名前缀 | 推断的 Provider |
 |-----------|-----------------|
-| `claude-*` | anthropic |
+| `claude-*` / `fable-*` | anthropic |
 | `gpt-*` / `o1-*` / `o3-*` / `o4-*` | openai |
 | `gemini-*` | google |
 | `deepseek-*` | deepseek |

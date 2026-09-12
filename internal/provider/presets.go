@@ -41,6 +41,7 @@ var PresetProviders = []struct {
 	EnvVar string
 }{
 	{Name: "openrouter", EnvVar: "OPENROUTER_API_KEY"},
+	{Name: "anthropic", EnvVar: "ANTHROPIC_API_KEY"},
 	{Name: "nvidia", EnvVar: "NVIDIA_API_KEY"},
 	{Name: "deepseek", EnvVar: "DEEPSEEK_API_KEY"},
 	{Name: "groq", EnvVar: "GROQ_API_KEY"},
@@ -90,6 +91,12 @@ var PresetCatalog = []PresetModel{
 	{Provider: "openrouter", ID: "mistralai/mistral-small-3.1-24b-instruct:free", DisplayName: "Mistral Small 3.1 24B · free (OpenRouter)"},
 	{Provider: "openrouter", ID: "meta-llama/llama-4-maverick:free", DisplayName: "Llama 4 Maverick · free (OpenRouter)"},
 
+	// --- Anthropic (first-party Messages API; ids from pi anthropic.models.ts).
+	// Newest flagship first: this order also fixes the bare-name default, so
+	// "anthropic" resolves to the latest Fable (see CanonicalizeModel). ---
+	{Provider: "anthropic", ID: "claude-fable-5-1", DisplayName: "Claude Fable 5.1"},
+	{Provider: "anthropic", ID: "claude-fable-5", DisplayName: "Claude Fable 5"},
+
 	// --- NVIDIA NIM (hosted, OpenAI-compatible) ---
 	{Provider: "nvidia", ID: "meta/llama-3.3-70b-instruct", DisplayName: "Llama 3.3 70B (NVIDIA)"},
 	{Provider: "nvidia", ID: "meta/llama-3.1-405b-instruct", DisplayName: "Llama 3.1 405B (NVIDIA)"},
@@ -108,6 +115,7 @@ var PresetCatalog = []PresetModel{
 	// --- DeepSeek (direct, OpenAI-compatible; ids from pi deepseek.models.ts) ---
 	{Provider: "deepseek", ID: "deepseek-v4-flash", DisplayName: "DeepSeek V4 Flash"},
 	{Provider: "deepseek", ID: "deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro"},
+	{Provider: "deepseek", ID: "deepseek-flash", DisplayName: "DeepSeek Flash"},
 
 	// --- Groq (fast inference; ids from pi groq.models.ts) ---
 	{Provider: "groq", ID: "llama-3.3-70b-versatile", DisplayName: "Llama 3.3 70B (Groq)"},
@@ -134,10 +142,12 @@ var PresetCatalog = []PresetModel{
 	{Provider: "moonshotai", ID: "kimi-k2.6", DisplayName: "Kimi K2.6"},
 	{Provider: "moonshotai", ID: "kimi-k3", DisplayName: "Kimi K3"},
 
-	// --- Z.AI GLM (ids from pi zai.models.ts) ---
+	// --- Z.AI GLM (ids from pi zai.models.ts; glm-5.3-flash is the vision-capable tier) ---
 	{Provider: "zai", ID: "glm-4.7", DisplayName: "GLM-4.7"},
 	{Provider: "zai", ID: "glm-5.1", DisplayName: "GLM-5.1"},
 	{Provider: "zai", ID: "glm-5.2", DisplayName: "GLM-5.2"},
+	{Provider: "zai", ID: "glm-5.3", DisplayName: "GLM-5.3"},
+	{Provider: "zai", ID: "glm-5.3-flash", DisplayName: "GLM-5.3 Flash"},
 
 	// --- Fireworks (ids from pi fireworks.models.ts) ---
 	{Provider: "fireworks", ID: "accounts/fireworks/models/deepseek-v4-pro", DisplayName: "DeepSeek V4 Pro (Fireworks)"},

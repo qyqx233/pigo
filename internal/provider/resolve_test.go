@@ -357,3 +357,26 @@ func TestResolveProviderBareProviderWithoutPresetsErrors(t *testing.T) {
 		t.Errorf("error = %q, want it to explain the provider/model mismatch", err.Error())
 	}
 }
+
+// TestResolveProviderAnthropicPresets verifies the Fable presets resolve to the
+// first-party anthropic provider with the wire id passed through unchanged, and
+// that the bare provider name "anthropic" defaults to the newest Fable (the
+// anthropic section is ordered newest-first to feed CanonicalizeModel).
+func TestResolveProviderAnthropicPresets(t *testing.T) {
+	for _, id := range []string{"claude-fable-5", "claude-fable-5-1"} {
+		prov, name, err := ResolveProvider(id, "", "", "", os.Getenv)
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", id, err)
+		}
+		if name != "anthropic" {
+			t.Errorf("ResolveProvider(%q) provider = %q, want anthropic", id, name)
+		}
+		models := prov.Models()
+		if len(models) != 1 || models[0].ID != id || models[0].Provider != "anthropic" {
+			t.Errorf("ResolveProvider(%q) models = %+v, want one anthropic entry with the same id", id, models)
+		}
+	}
+	if got := CanonicalizeModel("anthropic"); got != "claude-fable-5-1" {
+		t.Errorf("CanonicalizeModel(anthropic) = %q, want claude-fable-5-1 (newest-first)", got)
+	}
+}
