@@ -204,13 +204,16 @@ pigo -a -p "运行 go test ./... 并修复失败的用例"
 模型 id 通过启发式规则映射到具体 Provider（`--protocol` 显式指定时优先级最高）：
 
 1. **`--protocol`** 显式选择 → `openai`（需配合 `--base-url`）或 `anthropic`（默认公有 Anthropic API）。
-2. **预置目录命中** → 使用预置声明的 Provider（REPL 中可用 `/models` 查看、`/model <id>` 切换）。
-3. **`ollama/` 前缀** 或 base URL 含 `11434` → 本地 Ollama。
-4. **`nvidia/` 前缀** → NVIDIA NIM。
-5. **按模型名推断** → 未设 `--provider`/`--protocol`/`--base-url` 时，从模型名的知名前缀推断其第一方内置 Provider（如 `-m claude-opus-4-8` 直连 Anthropic，无需再写 `--provider`）。
-6. **其余** → OpenRouter（默认）。
+2. **裸 Provider 名** → 视为该 Provider 的默认模型（取预置目录中该 Provider 的第一个预置 id，如 `zai` → `glm-4.7`、`deepseek` → `deepseek-v4-flash`）。`/model zai`、`pigo --model zai`、config.toml 的 `model = "zai"` 三种写法等价。
+3. **预置目录命中** → 使用预置声明的 Provider（REPL 中可用 `/models` 查看、`/model <id>` 切换）。
+4. **`ollama/` 前缀** 或 base URL 含 `11434` → 本地 Ollama。
+5. **`nvidia/` 前缀** → NVIDIA NIM。
+6. **按模型名推断** → 未设 `--provider`/`--protocol`/`--base-url` 时，从模型名的知名前缀推断其第一方内置 Provider（如 `-m claude-opus-4-8` 直连 Anthropic，无需再写 `--provider`）。
+7. **其余** → OpenRouter（默认）。例外：裸 id 恰是内置 Provider 名但该 Provider 没有预置模型（如特殊认证网关）时，直接报错说明原因，而不是静默发往 OpenRouter。
 
-> **优先级**：显式 flag（`--provider` > `--protocol`）> 预置目录 > `ollama/`/`nvidia/` 前缀 > 模型名推断 > OpenRouter 默认。显式 `--provider` 始终胜出；给了 `--base-url` 会被视为自定义端点信号，跳过第 5 步推断。
+> **优先级**：显式 flag（`--provider` > `--protocol`）> 预置目录 > `ollama/`/`nvidia/` 前缀 > 模型名推断 > OpenRouter 默认。显式 `--provider` 始终胜出；给了 `--base-url` 会被视为自定义端点信号，跳过第 6 步推断。
+
+**默认模型**：在 `~/.config/pigo/config.toml` 写 `model = "zai"`（裸 Provider 名，取其默认模型）或具体 id 如 `model = "glm-4.7"`，启动即生效；命令行 `--model` 仍可临时覆盖。对应 Provider 的 API Key 环境变量需提前设好（如智谱 `ZAI_API_KEY`、DeepSeek `DEEPSEEK_API_KEY`）。缺 Key 的报错会指明应设置的环境变量名。
 
 **按模型名推断的前缀对照**（仅推断能唯一确定 Provider 的前缀；`llama-*`、`qwq-*`、`gemma-*`、`mixtral-*` 等被多家网关服务的家族，以及形如 `provider/model` 的 routed id，不推断，回落到 OpenRouter 默认）：
 

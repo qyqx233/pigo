@@ -17,6 +17,8 @@
 // resolved from the environment at request time (see auth.go) and never logged.
 package provider
 
+import "strings"
+
 // ProviderSpec is the metadata describing one built-in provider. It is the
 // single source of truth consumed by auth resolution, the --provider flag,
 // base_url override handling, and per-provider wiring.
@@ -364,6 +366,18 @@ var providerRegistryByName = func() map[string]ProviderSpec {
 func LookupProviderSpec(name string) (ProviderSpec, bool) {
 	spec, ok := providerRegistryByName[name]
 	return spec, ok
+}
+
+// APIKeyEnvHint returns a human-readable hint naming the environment variable(s)
+// that satisfy the provider's credential check, for embedding in missing-key
+// errors (issue #564: "openrouter: missing API key" alone leaves the user
+// guessing what to set). Unknown providers fall back to the generic
+// <PROVIDER>_API_KEY convention.
+func APIKeyEnvHint(name string) string {
+	if spec, ok := LookupProviderSpec(name); ok && len(spec.EnvVars) > 0 {
+		return strings.Join(spec.EnvVars, " or ")
+	}
+	return strings.ToUpper(name) + "_API_KEY"
 }
 
 // ProviderSpecs returns all built-in provider specs in registry (display) order.

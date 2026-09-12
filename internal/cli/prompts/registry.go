@@ -230,14 +230,18 @@ func RegisterLiveCommands(reg *runtime.SlashRegistry, live *cli.LiveConfig) {
 			if id == "" {
 				return fmt.Sprintf("model: %s (provider: %s)\nrun /models to see presets, or /model <id> to switch", live.Model, live.ProviderName)
 			}
-			prov, providerName, err := provider.ResolveProvider(id, live.BaseURL, live.Protocol, "", os.Getenv)
+			// A bare provider name ("zai") selects that provider's default
+			// model (issue #564): carry the canonical id into live.Model so
+			// the wire request and status bar show a real model id.
+			model := provider.CanonicalizeModel(id)
+			prov, providerName, err := provider.ResolveProvider(model, live.BaseURL, live.Protocol, "", os.Getenv)
 			if err != nil {
 				return fmt.Sprintf("model: cannot switch to %q: %v", id, err)
 			}
-			live.Model = id
+			live.Model = model
 			live.ProviderName = providerName
 			live.Provider = prov
-			return fmt.Sprintf("model switched to %s (provider: %s)", id, providerName)
+			return fmt.Sprintf("model switched to %s (provider: %s)", model, providerName)
 		},
 	})
 	reg.AddBuiltin(runtime.SlashCommand{

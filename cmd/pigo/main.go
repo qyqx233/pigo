@@ -36,6 +36,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/tui"
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/dream"
+	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/selfupdate"
 )
 
@@ -226,6 +227,12 @@ func main() {
 	} else {
 		applyFileConfig(&opts, cfg, flag.CommandLine.Changed)
 	}
+
+	// A bare provider name ("zai", "deepseek") means that provider's default
+	// model (issue #564): canonicalize once here so every downstream consumer —
+	// SetupEnv, the REPL/TUI live seeds, sub-agent children — carries a real
+	// model id instead of routing the literal name to OpenRouter.
+	opts.model = provider.CanonicalizeModel(opts.model)
 
 	// --version is a standalone action: print build metadata and exit.
 	if opts.showVersion {

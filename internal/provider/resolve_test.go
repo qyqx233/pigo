@@ -294,3 +294,66 @@ func TestResolveBaseURLProviderSpecificEnv(t *testing.T) {
 		t.Errorf("flag beats provider-specific: got %q, want %q", got, "https://flag.example")
 	}
 }
+
+// TestCanonicalizeModelBareProviderName verifies a bare built-in provider name
+// maps to that provider's first preset id (issue #564), while real preset ids,
+// routed "provider/model" ids, and unknown names pass through unchanged.
+func TestCanonicalizeModelBareProviderName(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"zai", "glm-4.7"},
+		{"ZAI", "glm-4.7"},
+		{"  deepseek  ", "deepseek-v4-flash"},
+		{"glm-4.7", "glm-4.7"},
+		{"openai/gpt-4o", "openai/gpt-4o"},
+		{"not-a-provider", "not-a-provider"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := CanonicalizeModel(tc.in); got != tc.want {
+			t.Errorf("CanonicalizeModel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestResolveProviderBareProviderNameUsesDefaultModel verifies /model zai style
+// shorthand resolves to the zai provider with a real wire model id, instead of
+// silently falling back to OpenRouter with the literal id "zai".
+func TestResolveProviderBareProviderNameUsesDefaultModel(t *testing.T) {
+	prov, name, err := ResolveProvider("zai", "", "", "", os.Getenv)
+	if err != nil {
+		t.Fatalf("ResolveProvider(zai): %v", err)
+	}
+	if name != "zai" {
+		t.Errorf("provider name = %q, want %q", name, "zai")
+	}
+	models := prov.Models()
+	if len(models) != 1 || models[0].ID != "glm-4.7" || models[0].Provider != "zai" {
+		t.Errorf("models = %+v, want one zai/glm-4.7 entry", models)
+	}
+}
+
+// TestResolveProviderBareProviderWithoutPresetsErrors verifies a bare provider
+// name whose provider has no preset models surfaces a clear mismatch error
+// rather than the old silent OpenRouter fallback (issue #564).
+func TestResolveProviderBareProviderWithoutPresetsErrors(t *testing.T) {
+	var name string
+	for _, spec := range ProviderSpecs() {
+		if len(PresetsByProvider(spec.Name)) == 0 {
+			name = spec.Name
+			break
+		}
+	}
+	if name == "" {
+		t.Skip("every built-in provider has at least one preset model")
+	}
+	_, _, err := ResolveProvider(name, "", "", "", os.Getenv)
+	if err == nil {
+		t.Fatalf("ResolveProvider(%q) succeeded, want provider-name mismatch error", name)
+	}
+	if !strings.Contains(err.Error(), "names a provider") {
+		t.Errorf("error = %q, want it to explain the provider/model mismatch", err.Error())
+	}
+}
