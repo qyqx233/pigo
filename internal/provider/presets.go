@@ -42,6 +42,7 @@ var PresetProviders = []struct {
 }{
 	{Name: "openrouter", EnvVar: "OPENROUTER_API_KEY"},
 	{Name: "anthropic", EnvVar: "ANTHROPIC_API_KEY"},
+	{Name: "openai", EnvVar: "OPENAI_API_KEY"},
 	{Name: "nvidia", EnvVar: "NVIDIA_API_KEY"},
 	{Name: "deepseek", EnvVar: "DEEPSEEK_API_KEY"},
 	{Name: "groq", EnvVar: "GROQ_API_KEY"},
@@ -97,6 +98,17 @@ var PresetCatalog = []PresetModel{
 	{Provider: "anthropic", ID: "claude-fable-5-1", DisplayName: "Claude Fable 5.1"},
 	{Provider: "anthropic", ID: "claude-fable-5", DisplayName: "Claude Fable 5"},
 
+	// --- OpenAI (first-party Responses/Chat Completions; ids from Azure's
+	// model list, 2026-09). Newest flagship first: this order also fixes the
+	// bare-name default, so "openai" resolves to gpt-6-astra. ---
+	{Provider: "openai", ID: "gpt-6-astra", DisplayName: "GPT-6 Astra"},
+	{Provider: "openai", ID: "gpt-5.6", DisplayName: "GPT-5.6"},
+	{Provider: "openai", ID: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol"},
+	{Provider: "openai", ID: "gpt-5.6-terra", DisplayName: "GPT-5.6 Terra"},
+	{Provider: "openai", ID: "gpt-5.6-luna", DisplayName: "GPT-5.6 Luna"},
+	{Provider: "openai", ID: "gpt-5.6-cyber", DisplayName: "GPT-5.6 Cyber"},
+	{Provider: "openai", ID: "gpt-5.5", DisplayName: "GPT-5.5"},
+
 	// --- NVIDIA NIM (hosted, OpenAI-compatible) ---
 	{Provider: "nvidia", ID: "meta/llama-3.3-70b-instruct", DisplayName: "Llama 3.3 70B (NVIDIA)"},
 	{Provider: "nvidia", ID: "meta/llama-3.1-405b-instruct", DisplayName: "Llama 3.1 405B (NVIDIA)"},
@@ -123,6 +135,7 @@ var PresetCatalog = []PresetModel{
 	{Provider: "groq", ID: "qwen/qwen3-32b", DisplayName: "Qwen3 32B (Groq)"},
 
 	// --- xAI Grok (ids from pi xai.models.ts) ---
+	{Provider: "xai", ID: "grok-4.6", DisplayName: "Grok 4.6"},
 	{Provider: "xai", ID: "grok-4.5", DisplayName: "Grok 4.5"},
 	{Provider: "xai", ID: "grok-4.3", DisplayName: "Grok 4.3"},
 
@@ -170,6 +183,7 @@ var PresetCatalog = []PresetModel{
 
 	// --- Xiaomi MiMo (ids from pi xiaomi.models.ts) ---
 	{Provider: "xiaomi", ID: "mimo-v2-pro", DisplayName: "MiMo-V2-Pro"},
+	{Provider: "xiaomi", ID: "mimo-v2-flash", DisplayName: "MiMo-V2-Flash"},
 	{Provider: "xiaomi", ID: "mimo-v2.5", DisplayName: "MiMo-V2.5"},
 	{Provider: "xiaomi", ID: "mimo-v2.5-pro", DisplayName: "MiMo-V2.5-Pro"},
 

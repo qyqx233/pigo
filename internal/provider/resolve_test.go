@@ -380,3 +380,39 @@ func TestResolveProviderAnthropicPresets(t *testing.T) {
 		t.Errorf("CanonicalizeModel(anthropic) = %q, want claude-fable-5-1 (newest-first)", got)
 	}
 }
+
+// TestResolveProviderOpenAIAndNewPresets verifies the OpenAI section resolves to
+// the first-party openai provider (bare "openai" defaults to the newest
+// flagship, newest-first order), and the new xiaomi/xai ids resolve unchanged.
+func TestResolveProviderOpenAIAndNewPresets(t *testing.T) {
+	for _, id := range []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.5"} {
+		prov, name, err := ResolveProvider(id, "", "", "", os.Getenv)
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", id, err)
+		}
+		if name != "openai" {
+			t.Errorf("ResolveProvider(%q) provider = %q, want openai", id, name)
+		}
+		models := prov.Models()
+		if len(models) != 1 || models[0].ID != id || models[0].Provider != "openai" {
+			t.Errorf("ResolveProvider(%q) models = %+v, want one openai entry with the same id", id, models)
+		}
+	}
+	if got := CanonicalizeModel("openai"); got != "gpt-6-astra" {
+		t.Errorf("CanonicalizeModel(openai) = %q, want gpt-6-astra (newest-first)", got)
+	}
+	for _, tc := range []struct{ id, provider string }{
+		{"mimo-v2-flash", "xiaomi"},
+		{"grok-4.6", "xai"},
+		{"glm-5.3-flash", "zai"},
+		{"deepseek-flash", "deepseek"},
+	} {
+		_, name, err := ResolveProvider(tc.id, "", "", "", os.Getenv)
+		if err != nil {
+			t.Fatalf("ResolveProvider(%q): %v", tc.id, err)
+		}
+		if name != tc.provider {
+			t.Errorf("ResolveProvider(%q) provider = %q, want %q", tc.id, name, tc.provider)
+		}
+	}
+}
