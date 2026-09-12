@@ -64,6 +64,18 @@ func New(opts ...Option) (*Session, error) {
 		return nil, err
 	}
 
+	allTools, err := adaptCustomTools(c.customTools, env.Tools)
+	if err != nil {
+		if env.Plugins != nil {
+			_ = env.Plugins.Close()
+		}
+		if env.Memory != nil {
+			_ = env.Memory.Close()
+		}
+		return nil, err
+	}
+	env.Tools = allTools
+
 	// Resolve the API key by provider name: an explicit WithAPIKey overrides the
 	// provider's environment variable. The key is held only in the credential
 	// store and never logged.
@@ -88,6 +100,14 @@ func New(opts ...Option) (*Session, error) {
 	}, nil
 }
 
+func structuredStreamHandler(onEvent func(Event)) runtime.StreamHandler {
+	if onEvent == nil {
+		return runtime.StreamHandler{}
+	}
+	mapper := &eventMapper{emit: onEvent}
+	return runtime.StreamHandler{OnEvent: mapper.handle}
+}
+
 // Prompt sends one user message, runs the agent loop to completion (executing
 // any tool calls the model makes along the way), and returns the assistant's
 // final text. The exchange is appended to the session history so later prompts
@@ -101,6 +121,18 @@ func (s *Session) Prompt(ctx context.Context, prompt string) (string, error) {
 // also returned. Tool calls still run automatically between text chunks. A nil
 // onText makes Stream behave exactly like Prompt.
 func (s *Session) Stream(ctx context.Context, prompt string, onText func(string)) (string, error) {
+	return s.run(ctx, prompt, runtime.StreamHandler{OnText: onText})
+}
+
+// StreamEvents is Prompt with stable structured events. onEvent, if non-nil,
+// receives message/thinking deltas, tool execution lifecycle events, message
+// completion, and usage in agent-loop order. The complete final assistant text
+// is also returned. A nil onEvent behaves exactly like Prompt.
+func (s *Session) StreamEvents(ctx context.Context, prompt string, onEvent func(Event)) (string, error) {
+	return s.run(ctx, prompt, structuredStreamHandler(onEvent))
+}
+
+func (s *Session) run(ctx context.Context, prompt string, handler runtime.StreamHandler) (string, error) {
 	// The loop expects the initiating user message already appended; it then
 	// mutates agentCtx.Messages in place (assistant + tool results), which is
 	// what carries the conversation forward across calls.
@@ -110,7 +142,7 @@ func (s *Session) Stream(ctx context.Context, prompt string, onText func(string)
 	})
 
 	stream := runtime.StartRun(ctx, s.agentCtx, s.runCfg)
-	final, err := runtime.DrainStream(ctx, stream, runtime.StreamHandler{OnText: onText})
+	final, err := runtime.DrainStream(ctx, stream, handler)
 	if err != nil {
 		return "", err
 	}
@@ -127,9 +159,9 @@ func (s *Session) Reset() {
 }
 
 // ToolNames returns the names of the tools available to this session, in the
-// order they are advertised to the model. It reflects the applied tool policy,
-// so it is a convenient way to confirm WithTools/WithDisallowedTools did what
-// you intended. The result is empty for a WithoutTools session.
+// order they are advertised to the model. It reflects both the applied built-in
+// tool policy and explicitly registered custom tools. A WithoutTools session is
+// empty unless WithCustomTools supplied an explicit custom set.
 func (s *Session) ToolNames() []string {
 	names := make([]string, len(s.env.Tools))
 	for i, t := range s.env.Tools {
