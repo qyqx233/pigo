@@ -43,6 +43,7 @@ var PresetProviders = []struct {
 	{Name: "openrouter", EnvVar: "OPENROUTER_API_KEY"},
 	{Name: "anthropic", EnvVar: "ANTHROPIC_API_KEY"},
 	{Name: "openai", EnvVar: "OPENAI_API_KEY"},
+	{Name: "google", EnvVar: "GEMINI_API_KEY"},
 	{Name: "nvidia", EnvVar: "NVIDIA_API_KEY"},
 	{Name: "deepseek", EnvVar: "DEEPSEEK_API_KEY"},
 	{Name: "groq", EnvVar: "GROQ_API_KEY"},
@@ -108,6 +109,17 @@ var PresetCatalog = []PresetModel{
 	{Provider: "openai", ID: "gpt-5.6-luna", DisplayName: "GPT-5.6 Luna"},
 	{Provider: "openai", ID: "gpt-5.6-cyber", DisplayName: "GPT-5.6 Cyber"},
 	{Provider: "openai", ID: "gpt-5.5", DisplayName: "GPT-5.5"},
+
+	// --- Google Gemini (first-party Gemini API via generativelanguage;
+	// ids as tracked by LiteLLM's direct-entry model registry). Newest first
+	// so the bare "google" shorthand defaults to the newest flash flagship;
+	// the -latest aliases track Google's rolling newest. ---
+	{Provider: "google", ID: "gemini-3.8-flash", DisplayName: "Gemini 3.8 Flash"},
+	{Provider: "google", ID: "gemini-3.7-flash", DisplayName: "Gemini 3.7 Flash"},
+	{Provider: "google", ID: "gemini-3.5-flash", DisplayName: "Gemini 3.5 Flash"},
+	{Provider: "google", ID: "gemini-3.1-pro-preview", DisplayName: "Gemini 3.1 Pro (preview)"},
+	{Provider: "google", ID: "gemini-flash-latest", DisplayName: "Gemini Flash (latest)"},
+	{Provider: "google", ID: "gemini-pro-latest", DisplayName: "Gemini Pro (latest)"},
 
 	// --- NVIDIA NIM (hosted, OpenAI-compatible) ---
 	{Provider: "nvidia", ID: "meta/llama-3.3-70b-instruct", DisplayName: "Llama 3.3 70B (NVIDIA)"},

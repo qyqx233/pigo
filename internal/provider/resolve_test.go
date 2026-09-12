@@ -401,7 +401,18 @@ func TestResolveProviderOpenAIAndNewPresets(t *testing.T) {
 	if got := CanonicalizeModel("openai"); got != "gpt-6-astra" {
 		t.Errorf("CanonicalizeModel(openai) = %q, want gpt-6-astra (newest-first)", got)
 	}
+	provGoogle, googleName, gerr := ResolveProvider("google", "", "", "", os.Getenv)
+	if gerr != nil {
+		t.Fatalf("ResolveProvider(google): %v", gerr)
+	}
+	if googleName != "google" {
+		t.Errorf("ResolveProvider(google) provider = %q, want google", googleName)
+	}
+	if models := provGoogle.Models(); len(models) != 1 || models[0].ID != "gemini-3.8-flash" {
+		t.Errorf("ResolveProvider(google) models = %+v, want one gemini-3.8-flash entry", models)
+	}
 	for _, tc := range []struct{ id, provider string }{
+		{"gemini-3.8-flash", "google"},
 		{"mimo-v2-flash", "xiaomi"},
 		{"grok-4.6", "xai"},
 		{"glm-5.3-flash", "zai"},
