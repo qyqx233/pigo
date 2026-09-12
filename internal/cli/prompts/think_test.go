@@ -14,7 +14,7 @@ import (
 func TestThinkCommandSwitchesLevel(t *testing.T) {
 	live := &cli.LiveConfig{Model: "test", ProviderName: "test", ThinkingLevel: agentcore.ThinkingMedium}
 	reg := runtime.NewSlashRegistry()
-	RegisterLiveCommands(reg, live)
+	RegisterLiveCommands(reg, live, nil)
 
 	out, err := reg.ResolveOutcome("/think high")
 	if err != nil {
@@ -45,7 +45,7 @@ func TestThinkCommandSwitchesLevel(t *testing.T) {
 func TestThinkCommandRejectsInvalid(t *testing.T) {
 	live := &cli.LiveConfig{Model: "test", ProviderName: "test", ThinkingLevel: agentcore.ThinkingLow}
 	reg := runtime.NewSlashRegistry()
-	RegisterLiveCommands(reg, live)
+	RegisterLiveCommands(reg, live, nil)
 
 	out, err := reg.ResolveOutcome("/think bogus")
 	if err != nil {
@@ -64,7 +64,7 @@ func TestThinkCommandRejectsInvalid(t *testing.T) {
 func TestEffectAliasesThink(t *testing.T) {
 	live := &cli.LiveConfig{Model: "test", ProviderName: "test", ThinkingLevel: agentcore.ThinkingMedium}
 	reg := runtime.NewSlashRegistry()
-	RegisterLiveCommands(reg, live)
+	RegisterLiveCommands(reg, live, nil)
 
 	out, err := reg.ResolveOutcome("/effect high")
 	if err != nil {
