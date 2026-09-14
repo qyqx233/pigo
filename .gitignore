@@ -40,6 +40,8 @@ config.toml
 
 # Compiled binary (go build ./cmd/pigo produces ./pigo)
 /pigo
+/pigo-server
+/pigo-server.new
 
 # goreleaser output
 /dist/

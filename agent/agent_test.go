@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -156,5 +157,26 @@ func TestCloseHermetic(t *testing.T) {
 	}
 	if err := sess.Close(); err != nil {
 		t.Errorf("Close() = %v, want nil", err)
+	}
+}
+
+// TestPromptSurfacesProviderFailure guards the SDK boundary used by HTTP
+// servers: runtime failures are terminal assistant messages internally, but a
+// caller of Prompt must receive a non-nil error instead of an empty success.
+func TestPromptSurfacesProviderFailure(t *testing.T) {
+	hermetic(t)
+	t.Setenv("OPENROUTER_API_KEY", "")
+	sess, err := agent.New(agent.WithModel("openrouter/free"), agent.WithoutTools())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sess.Close()
+
+	reply, err := sess.Prompt(context.Background(), "hello")
+	if err == nil {
+		t.Fatalf("Prompt = (%q, nil), want provider error", reply)
+	}
+	if !strings.Contains(err.Error(), "missing API key") {
+		t.Fatalf("Prompt error = %q, want missing API key", err)
 	}
 }

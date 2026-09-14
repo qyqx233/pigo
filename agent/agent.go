@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/cli/run"
@@ -99,7 +100,9 @@ func (s *Session) Prompt(ctx context.Context, prompt string) (string, error) {
 // Stream is Prompt with incremental output: onText, if non-nil, is called with
 // each chunk of assistant text as it arrives, and the complete final text is
 // also returned. Tool calls still run automatically between text chunks. A nil
-// onText makes Stream behave exactly like Prompt.
+// onText makes Stream behave exactly like Prompt. Provider failures are returned
+// as errors even though the lower-level runtime represents them as terminal
+// assistant messages.
 func (s *Session) Stream(ctx context.Context, prompt string, onText func(string)) (string, error) {
 	// The loop expects the initiating user message already appended; it then
 	// mutates agentCtx.Messages in place (assistant + tool results), which is
@@ -117,7 +120,22 @@ func (s *Session) Stream(ctx context.Context, prompt string, onText func(string)
 	if final == nil {
 		return "", nil
 	}
-	return agentcore.ContentToText(final.Content), nil
+	text := agentcore.ContentToText(final.Content)
+	switch final.StopReason {
+	case agentcore.StopReasonError:
+		reason := strings.TrimSpace(final.ErrorMessage)
+		if reason == "" {
+			reason = "error"
+		}
+		return text, &runtime.ErrRunFailed{Reason: reason}
+	case agentcore.StopReasonAborted:
+		if err := ctx.Err(); err != nil {
+			return text, err
+		}
+		return text, &runtime.ErrRunFailed{Reason: "aborted"}
+	default:
+		return text, nil
+	}
 }
 
 // Reset clears the conversation history, so the next Prompt starts a fresh
