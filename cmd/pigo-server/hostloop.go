@@ -52,7 +52,7 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 		thinking = agentcore.ThinkingMedium
 	}
 	reg := run.ToolRegistry(tools)
-	managed.runCfg = run.NewConfig(managed.meta.Model, providerName, thinking, prov, creds, reg, run.TodoReminders(tools))
+	managed.runCfg = run.NewConfig(managed.meta.Model, providerName, thinking, prov, creds, reg, run.TodoReminders(tools), nil)
 	msgs := s.loadTranscript(managed)
 	managed.agentCtx = &agentcore.AgentContext{
 		SystemPrompt: prompt,

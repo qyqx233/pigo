@@ -124,7 +124,7 @@ func (s *Session) slashRegistry() (*runtime.SlashRegistry, *cli.LiveConfig, erro
 		Provider:      s.env.Provider,
 		ThinkingLevel: s.runCfg.ThinkingLevel,
 	}
-	registry, err := prompts.BuildSlashRegistry(live, s.env.Skills, s.env.Plugins, prompts.PromptTemplateSources{
+	registry, err := prompts.BuildSlashRegistry(live, s.creds, s.env.Skills, s.env.Plugins, prompts.PromptTemplateSources{
 		ProjectDir:     filepath.Join(s.env.Cwd, ".pigo", "prompts"),
 		ProjectTrusted: run.Trusted(s.env.Cwd),
 	})

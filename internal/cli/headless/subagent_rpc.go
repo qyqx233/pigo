@@ -87,8 +87,11 @@ func handleSubAgentRequest(ctx context.Context, enc *json.Encoder, req *jsonrpc.
 	}
 	// Resolve the provider the same way the CLI does, so the subprocess targets
 	// the same gateway the parent's NewRunConfig encoded. Credentials come from
-	// the inherited environment (the parent's env vars).
-	prov, providerName, err := provider.ResolveProvider(params.Model, params.BaseURL, params.Protocol, "", os.Getenv)
+	// the inherited environment (the parent's env vars). A bare provider name
+	// selects that provider's default model (#564); the canonical id feeds both
+	// the driver and the run config so the wire request carries a real id.
+	model := provider.CanonicalizeModel(params.Model)
+	prov, providerName, err := provider.ResolveProvider(model, params.BaseURL, params.Protocol, "", os.Getenv)
 	if err != nil {
 		writeSubAgentError(enc, req.ID, -32603, "resolve provider: "+err.Error())
 		return
@@ -99,7 +102,7 @@ func handleSubAgentRequest(ctx context.Context, enc *json.Encoder, req *jsonrpc.
 	creds := provider.NewCredentialStore(nil) // env-resolved
 	runCfg := runtime.RunConfig{
 		LoopConfig: runtime.LoopConfig{
-			Model:     params.Model,
+			Model:     model,
 			Provider:  providerName,
 			Stream:    provider.StreamFnFromProvider(prov),
 			GetAPIKey: creds.GetAPIKey,

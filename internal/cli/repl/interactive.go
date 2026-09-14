@@ -186,7 +186,7 @@ func Run(opts Options) error {
 	// ~/.agents/skills. A load error is non-fatal — the REPL still runs with the
 	// built-ins. Instance built-ins that need live state (/model, /help) are
 	// registered against `live`.
-	slash, err := prompts.BuildSlashRegistry(live, opts.Skills, opts.Plugins, prompts.PromptTemplateSources{
+	slash, err := prompts.BuildSlashRegistry(live, creds, opts.Skills, opts.Plugins, prompts.PromptTemplateSources{
 		Settings:       opts.ConfigPrompts,
 		CLI:            opts.CliPrompts,
 		Disable:        opts.NoPromptTemplates,
@@ -220,27 +220,28 @@ func Run(opts Options) error {
 	maybeStartBackgroundDream(os.Stdout, dream.ResolveMemoryRoot(), cwd, opts.Dream)
 
 	return runREPL(os.Stdin, os.Stdout, replDeps{
-		store:     store,
-		header:    header,
-		agentCtx:  agentCtx,
-		live:      live,
-		reg:       reg,
-		reminders: run.TodoReminders(opts.Tools),
-		slash:     slash,
-		creds:     creds,
-		trust:     mgr,
-		cwd:       cwd,
-		in:        reader,
-		confirmMu: &sync.Mutex{},
-		curLeaf:   curLeaf,
-		persisted: len(history),
+		store:      store,
+		header:     header,
+		agentCtx:   agentCtx,
+		live:       live,
+		reg:        reg,
+		reminders:  run.TodoReminders(opts.Tools),
+		schedule:   agenttool.ScheduleFromTools(opts.Tools),
+		slash:      slash,
+		creds:      creds,
+		trust:      mgr,
+		cwd:        cwd,
+		in:         reader,
+		confirmMu:  &sync.Mutex{},
+		curLeaf:    curLeaf,
+		persisted:  len(history),
 		memoryRoot: run.MemoryRootFromTools(opts.Tools),
 		memstore:   run.MemoryStoreFromTools(opts.Tools),
 		snap:       run.SnapshotRecorderFromTools(opts.Tools),
 		jobs:       run.BashJobStoreFromTools(opts.Tools),
-		notifier:  plugin.NewEventNotifier(opts.Plugins, os.Stderr),
-		goal:      agenttool.NewGoalState(),
-		telemetry: cli.NewTelemetryHolder(),
+		notifier:   plugin.NewEventNotifier(opts.Plugins, os.Stderr),
+		goal:       agenttool.NewGoalState(),
+		telemetry:  cli.NewTelemetryHolder(),
 	})
 }
 

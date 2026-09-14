@@ -40,6 +40,8 @@ func NewLLMConsolidator(model, baseURL, protocol, providerName, apiKey string, t
 // error event whose message we convert to an error (so the Runner marks the run
 // failed rather than silently deleting nothing, SPEC §5.5).
 func newModelCompleter(model, baseURL, protocol, providerName, apiKey string, thinking agentcore.ThinkingLevel) (completeFn, error) {
+	// A bare provider name selects that provider's default model (#564).
+	model = provider.CanonicalizeModel(model)
 	prov, resolvedName, err := provider.ResolveProvider(model, baseURL, protocol, providerName, os.Getenv)
 	if err != nil {
 		return nil, fmt.Errorf("dream: resolve provider: %w", err)
@@ -244,4 +246,3 @@ func isFilenameChar(b byte) bool {
 	}
 	return false
 }
-

@@ -27,14 +27,19 @@ import (
 //
 // When protocol is empty, resolution falls back to model-id heuristics:
 //
-//  1. If the id is in the preset catalog, use its declared provider (this is how
+//  1. A bare provider name (e.g. "zai") is canonicalized to that provider's
+//     first preset model id (see CanonicalizeModel, issue #564).
+//  2. If the id is in the preset catalog, use its declared provider (this is how
 //     OpenRouter/NVIDIA/Ollama presets pick the right gateway).
-//  2. An "ollama/" prefix (or a base URL on the Ollama port) → local Ollama.
-//  3. An "nvidia/" prefix → NVIDIA NIM (strips the prefix for the wire id).
-//  4. Model-name inference: with no --base-url, a well-known model-name prefix
+//  3. An "ollama/" prefix (or a base URL on the Ollama port) → local Ollama.
+//  4. An "nvidia/" prefix → NVIDIA NIM (strips the prefix for the wire id).
+//  5. Model-name inference: with no --base-url, a well-known model-name prefix
 //     (e.g. "claude-*", "deepseek-*") selects its first-party built-in provider
 //     via ResolveNamedProvider (see InferProviderFromModel).
-//  5. Everything else → OpenRouter, the reference OpenAI-compatible gateway.
+//  6. A bare provider name with no preset models is an error naming the
+//     mismatch, rather than a silent OpenRouter fallback that fails later with
+//     a misleading missing-API-key error.
+//  7. Everything else → OpenRouter, the reference OpenAI-compatible gateway.
 //
 // An unknown protocol value is an error, surfaced to the caller for exit-code
 // mapping rather than silently falling back.
@@ -71,6 +76,16 @@ func ResolveProvider(model, baseURL, protocol, providerName string, env func(str
 		return NewAnthropicProvider(baseURL, []Model{{Provider: "anthropic", ID: model, SupportsImages: true}}), "anthropic", nil
 	case "":
 		// fall through to heuristic resolution
+	}
+
+	// 0.5 A bare provider name (e.g. "zai", "deepseek") is a common shorthand for
+	//     "that provider's default model" (issue #564): /model zai and --model zai
+	//     previously fell through to OpenRouter with the literal id "zai", failing
+	//     there with a misleading "openrouter: missing API key". Substitute the
+	//     provider's first preset id so both the driver and the wire request carry
+	//     a real model id. Any other id is returned unchanged.
+	if canon := CanonicalizeModel(model); canon != model {
+		model = canon
 	}
 
 	// 1. Preset catalog wins: a curated id knows its own provider.
@@ -113,8 +128,49 @@ func ResolveProvider(model, baseURL, protocol, providerName string, env func(str
 			return ResolveNamedProvider(name, model, baseURL, protocol, env)
 		}
 	}
-	// 5. Default: OpenRouter.
+	// 5. Default: OpenRouter — but a bare built-in provider name that reached this
+	//    point names a provider with no preset models (e.g. a special-auth
+	//    gateway). Silently routing it to OpenRouter would fail later with a
+	//    confusing missing-API-key error, so surface the mismatch instead.
+	if name := strings.ToLower(strings.TrimSpace(model)); IsProviderName(name) {
+		return nil, "", fmt.Errorf("%q names a provider, not a model id; pass a model id (see /models) or select it with --provider %s", model, name)
+	}
 	return NewOpenRouterProvider(baseURL, []Model{{Provider: "openrouter", ID: model, SupportsImages: true}}), "openrouter", nil
+}
+
+// CanonicalizeModel maps a bare built-in provider name (e.g. "zai", "DEEPSEEK")
+// to that provider's first preset model id (e.g. "glm-4.7"), so a user who
+// types the provider alone gets its default model instead of the literal id
+// being sent to OpenRouter (issue #564). Any other id — a real preset id, an
+// unknown name, a "provider/model" routed id — is returned unchanged.
+//
+// The mapping is exact-match on the trimmed, lowercased id against the built-in
+// provider registry; a model id that happens to equal a provider name is not a
+// meaningful OpenRouter id, so the ambiguity is harmless.
+func CanonicalizeModel(model string) string {
+	name := strings.ToLower(strings.TrimSpace(model))
+	if name == "" {
+		return model
+	}
+	spec, ok := LookupProviderSpec(name)
+	if !ok {
+		return model
+	}
+	if presets := PresetsByProvider(spec.Name); len(presets) > 0 {
+		return presets[0].ID
+	}
+	return model
+}
+
+// IsProviderName reports whether id is exactly a built-in provider name
+// (case-insensitive, surrounding whitespace tolerated).
+func IsProviderName(id string) bool {
+	name := strings.ToLower(strings.TrimSpace(id))
+	if name == "" {
+		return false
+	}
+	_, ok := LookupProviderSpec(name)
+	return ok
 }
 
 // ResolveNamedProvider builds the driver for an explicit --provider selection.

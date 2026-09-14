@@ -71,7 +71,7 @@ func (d *responsesDriver) Models() []Model { return d.models }
 func (d *responsesDriver) StreamCompletion(ctx context.Context, req CompletionRequest) (*AssistantMessageEventStream, error) {
 	if d.requiresAuth && strings.TrimSpace(req.Config.APIKey) == "" {
 		// Early "cannot build the stream": reference the provider, never a value.
-		return nil, fmt.Errorf("%s: missing API key", d.name)
+		return nil, fmt.Errorf("%s: missing API key (set %s)", d.name, APIKeyEnvHint(d.name))
 	}
 
 	opts := make([]option.RequestOption, 0, len(d.clientOpts)+2)

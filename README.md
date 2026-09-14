@@ -204,19 +204,30 @@ pigo -a -p "运行 go test ./... 并修复失败的用例"
 模型 id 通过启发式规则映射到具体 Provider（`--protocol` 显式指定时优先级最高）：
 
 1. **`--protocol`** 显式选择 → `openai`（需配合 `--base-url`）或 `anthropic`（默认公有 Anthropic API）。
-2. **预置目录命中** → 使用预置声明的 Provider（REPL 中可用 `/models` 查看、`/model <id>` 切换）。
-3. **`ollama/` 前缀** 或 base URL 含 `11434` → 本地 Ollama。
-4. **`nvidia/` 前缀** → NVIDIA NIM。
-5. **按模型名推断** → 未设 `--provider`/`--protocol`/`--base-url` 时，从模型名的知名前缀推断其第一方内置 Provider（如 `-m claude-opus-4-8` 直连 Anthropic，无需再写 `--provider`）。
-6. **其余** → OpenRouter（默认）。
+2. **裸 Provider 名** → 视为该 Provider 的默认模型（取预置目录中该 Provider 的第一个预置 id，如 `zai` → `glm-4.7`、`deepseek` → `deepseek-v4-flash`）。`/model zai`、`pigo --model zai`、config.toml 的 `model = "zai"` 三种写法等价。
+3. **预置目录命中** → 使用预置声明的 Provider（REPL 中可用 `/models` 查看、`/model <id>` 切换）。
+4. **`ollama/` 前缀** 或 base URL 含 `11434` → 本地 Ollama。
+5. **`nvidia/` 前缀** → NVIDIA NIM。
+6. **按模型名推断** → 未设 `--provider`/`--protocol`/`--base-url` 时，从模型名的知名前缀推断其第一方内置 Provider（如 `-m claude-opus-4-8` 直连 Anthropic，无需再写 `--provider`）。
+7. **其余** → OpenRouter（默认）。例外：裸 id 恰是内置 Provider 名但该 Provider 没有预置模型（如特殊认证网关）时，直接报错说明原因，而不是静默发往 OpenRouter。
 
-> **优先级**：显式 flag（`--provider` > `--protocol`）> 预置目录 > `ollama/`/`nvidia/` 前缀 > 模型名推断 > OpenRouter 默认。显式 `--provider` 始终胜出；给了 `--base-url` 会被视为自定义端点信号，跳过第 5 步推断。
+> **优先级**：显式 flag（`--provider` > `--protocol`）> 预置目录 > `ollama/`/`nvidia/` 前缀 > 模型名推断 > OpenRouter 默认。显式 `--provider` 始终胜出；给了 `--base-url` 会被视为自定义端点信号，跳过第 6 步推断。
+
+**凭证引用**：config.toml 可以只写凭据的**名字**而非明文——`credential = "deepseek-main"`，真实 key 存放在 `~/.pigo/.credentials.yaml`（权限应为 0600）：
+
+```yaml
+deepseek-main: sk-xxx
+```
+
+解析优先级：`--api-key` > config `api_key` > config `credential` 引用 > 环境变量。子进程（进程隔离子 Agent）默认继承**已清洗**的环境：凭证形态的变量（`*_API_KEY`/`*_TOKEN`/`*_SECRET` 等）与 `PIGO_*` 内部变量不会传给子进程。
+
+**默认模型**：在 `~/.config/pigo/config.toml` 写 `model = "zai"`（裸 Provider 名，取其默认模型）或具体 id 如 `model = "glm-4.7"`，启动即生效；命令行 `--model` 仍可临时覆盖。对应 Provider 的 API Key 环境变量需提前设好（如智谱 `ZAI_API_KEY`、DeepSeek `DEEPSEEK_API_KEY`）。缺 Key 的报错会指明应设置的环境变量名。
 
 **按模型名推断的前缀对照**（仅推断能唯一确定 Provider 的前缀；`llama-*`、`qwq-*`、`gemma-*`、`mixtral-*` 等被多家网关服务的家族，以及形如 `provider/model` 的 routed id，不推断，回落到 OpenRouter 默认）：
 
 | 模型名前缀 | 推断的 Provider |
 |-----------|-----------------|
-| `claude-*` | anthropic |
+| `claude-*` / `fable-*` | anthropic |
 | `gpt-*` / `o1-*` / `o3-*` / `o4-*` | openai |
 | `gemini-*` | google |
 | `deepseek-*` | deepseek |
@@ -336,6 +347,19 @@ pigo --list-sessions              # 列出会话
 pigo --resume 20260720-1530-abcd  # 续跑指定会话（无头/REPL 均可）
 pigo --continue                   # 续跑最近一次会话
 ```
+
+### GitHub PR Review Webhook
+
+```
+export PIGO_GITHUB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+pigo --github-review --github-webhook-repo smallnest/pigo
+```
+
+Opt-in 模式：GitHub webhook 收到 PR `ready_for_review` 事件后，自动创建一个**只读 review 会话**（仅 read/grep/find 工具，不能写文件、不能执行命令）并运行 review。部署前置条件：
+
+- 监听地址默认 `127.0.0.1:3081`，端点是**纯 HTTP**，必须放在 TLS 反向代理或隧道（如 ngrok、cloudflared、Caddy）之后才能暴露公网；
+- webhook secret 通过**环境变量名间接引用**（`--github-webhook-secret-env`），高熵值（`openssl rand -hex 32`），与 GitHub webhook 配置中的 secret 一致；
+- 事件验签（HMAC-SHA256）、按 delivery id 去重防重放；只处理 `pull_request` 的 `ready_for_review` action，其余事件 202 忽略。
 
 REPL 中的内置斜杠命令包括 `/model`、`/models`、`/think`、`/help`、`/compact`、`/fork`、`/clone`、`/tree`、`/rewind`、`/export`、`/import`、`/copy`、`/session`、`/status`、`/exit` 等。其中 `/think [off|minimal|low|medium|high|xhigh|max]` 可在运行时查看或切换推理强度（reasoning effort），空参展示当前级别，切换后自下一轮生效。`/rewind [n]` 是编辑回滚（对标 Claude Code 的 Esc-Esc）：空参列出各轮产生的还原点，`/rewind n` 会把 write/edit 工具改动的文件恢复到该轮之前的内容，并同时把对话回退到那一轮之前（暂不含 bash 改动的文件）。`/status` 一次性展示运行时模型配置、上下文占用与压缩、项目环境（信任 / 技能 / 插件）、凭据连通性，以及遥测数据（累计与最近一次 run 的轮次、工具耗时、上下文利用率）。
 
@@ -771,6 +795,7 @@ git push origin v0.2.0
 - pigo 会向解析出的 Provider 端点发起外部网络请求。
 - `bash` / `write` / `edit` 会在本地产生副作用，仅由项目信任机制把关；`--approve` 会跳过逐次确认，请在受信任的目录中使用，权衡便利与安全。
 - 处理来自文件、命令输出、网页等外部来源的内容时应视为不可信数据。
+- 需要操作系统级隔离时，参见 [docs/sandboxing.md](docs/sandboxing.md)：Docker 整进程、micro-VM、进程级策略沙箱三种模式与 trust/tool-policy 的组合矩阵。
 
 ---
 

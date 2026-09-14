@@ -17,6 +17,8 @@ func TestInferProviderFromModelKnown(t *testing.T) {
 	}{
 		{"claude-opus-4-8", "anthropic"},
 		{"claude-3.5-sonnet", "anthropic"},
+		{"fable-5", "anthropic"},
+		{"fable-5.1", "anthropic"},
 		{"gpt-4o", "openai"},
 		{"gpt-4o-mini", "openai"},
 		{"o1-preview", "openai"},

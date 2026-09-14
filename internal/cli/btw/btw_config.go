@@ -113,6 +113,8 @@ func ResolveBtwSettings(out io.Writer, host cli.Host) BtwRunSettings {
 	}
 
 	if model := strings.TrimSpace(cfg.Model); model != "" && model != s.Model {
+		// A bare provider name selects that provider's default model (#564).
+		model = provider.CanonicalizeModel(model)
 		prov, providerName, perr := provider.ResolveProvider(model, live.BaseURL, live.Protocol, "", os.Getenv)
 		if perr != nil {
 			fmt.Fprintf(out, "%s\n", ui.Colorize(ui.Enabled(), ui.Dim, fmt.Sprintf("btw: cannot use model %q (%v), falling back to %q", model, perr, s.Model)))

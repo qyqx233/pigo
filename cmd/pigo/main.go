@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	flag "github.com/spf13/pflag"
 
@@ -33,10 +35,13 @@ import (
 	"github.com/smallnest/pigo/internal/cli/pkgcmd"
 	"github.com/smallnest/pigo/internal/cli/repl"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/cli/sessioncmd"
 	"github.com/smallnest/pigo/internal/cli/tui"
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/dream"
+	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/selfupdate"
+	"github.com/smallnest/pigo/internal/webhook"
 )
 
 // Build metadata, injected at release time via -ldflags by goreleaser
@@ -65,8 +70,15 @@ type cliOptions struct {
 	outputFmt    string
 	noTools      bool
 	listSessions bool
-	resumeID     string
-	continueLast bool
+	// GitHub review webhook mode (--github-review, issue #567): run an isolated
+	// webhook listener that turns PR ready-for-review events into read-only
+	// review sessions.
+	githubReview           bool
+	githubWebhookSecretEnv string
+	githubWebhookAddr      string
+	githubWebhookRepo      string
+	resumeID               string
+	continueLast           bool
 	// approve grants the launch directory session-level trust up front (mirrors pi's
 	// --approve/-a): the first-launch trust prompt is skipped and side-effect
 	// tools (bash/write/edit) run without per-call confirmation for this run.
@@ -114,6 +126,11 @@ type cliOptions struct {
 	// showVersion prints build metadata (version/commit/date, injected at release
 	// time by goreleaser) and exits, without running the agent.
 	showVersion bool
+	// credentialRef is the config.toml `credential` value (issue #568): a named
+	// reference into ~/.pigo/.credentials.yaml (0600). It resolves to opts.apiKey
+	// when no --api-key / config api_key is present; the literal secret never
+	// touches config files.
+	credentialRef string
 	// noTUI forces the line-based REPL instead of the full-screen TUI (US-001).
 	// When set — or when stdout is not a TTY — the no-prompt path falls back to
 	// repl.Run rather than launching tui.Run.
@@ -150,6 +167,17 @@ type cliOptions struct {
 }
 
 func main() {
+	// Session subcommands (pigo session export|list, issue #570) dispatch early
+	// like the package-management ones: they are standalone actions that never
+	// touch the interactive/headless flag surface.
+	if len(os.Args) > 1 && os.Args[1] == "session" {
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: pigo session export <session-id> [flags] | pigo session list")
+			os.Exit(2)
+		}
+		os.Exit(sessioncmd.Run(os.Args[2], os.Args[3:], os.Stdout, os.Stderr))
+	}
+
 	// Package-management subcommands (pigo install|list|uninstall|update ...) are
 	// positional and distinct from the flag-driven agent modes, so peel them off
 	// before pflag parsing — the agent flags don't apply to them.
@@ -173,6 +201,10 @@ func main() {
 	flag.StringVarP(&opts.apiKey, "api-key", "k", "", "API key for the resolved provider (overrides env/config; else <PROVIDER>_API_KEY)")
 	flag.StringVarP(&opts.protocol, "protocol", "P", "", "force wire protocol for a custom endpoint: openai | anthropic (default: inferred from model id)")
 	flag.StringVar(&opts.provider, "provider", "", "select a built-in provider by name (e.g. deepseek, minimax); uses its default base URL, protocol, and API-key env var (see --help provider list)")
+	flag.BoolVar(&opts.githubReview, "github-review", false, "run the isolated GitHub ready-for-review webhook (issue #567): PR draft→ready creates a read-only review session and runs it")
+	flag.StringVar(&opts.githubWebhookSecretEnv, "github-webhook-secret-env", "PIGO_GITHUB_WEBHOOK_SECRET", "name of the env var holding the high-entropy GitHub webhook secret (credential reference; never the secret itself)")
+	flag.StringVar(&opts.githubWebhookAddr, "github-webhook-addr", "127.0.0.1:3081", "listen address for the GitHub review webhook (put a TLS reverse proxy/tunnel in front; the endpoint is plain HTTP)")
+	flag.StringVar(&opts.githubWebhookRepo, "github-webhook-repo", "", "restrict review to this repository (owner/name); empty accepts any repo")
 	flag.StringVarP(&opts.outputFmt, "output-format", "o", "text", "output format: text | stream-json")
 	flag.BoolVarP(&opts.noTools, "no-tools", "n", false, "disable the built-in file/shell tools")
 	flag.StringArrayVar(&opts.allowedTools, "allowed-tools", nil, "restrict the model to these tools (repeatable, comma-separated, case-insensitive); empty means no restriction and --disallowed-tools wins on conflict")
@@ -227,6 +259,29 @@ func main() {
 		applyFileConfig(&opts, cfg, flag.CommandLine.Changed)
 	}
 
+	// A bare provider name ("zai", "deepseek") means that provider's default
+	// model (issue #564): canonicalize once here so every downstream consumer —
+	// SetupEnv, the REPL/TUI live seeds, sub-agent children — carries a real
+	// model id instead of routing the literal name to OpenRouter.
+	opts.model = provider.CanonicalizeModel(opts.model)
+
+	// Resolve a credential reference into an API key (issue #568): the config
+	// carries only a NAME; the literal secret lives in
+	// $PIGO_HOME/.credentials.yaml (0600). A missing reference warns rather
+	// than aborts — the provider may authenticate from the ambient environment.
+	if opts.credentialRef != "" && opts.apiKey == "" {
+		path := provider.CredentialFilePath()
+		if provider.CredentialFilePermissionsWarn(path) {
+			fmt.Fprintf(os.Stderr, "pigo: warning: %s is readable by group/other; chmod 600 recommended\n", path)
+		}
+		key, err := provider.ResolveCredentialReference(path, opts.credentialRef)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pigo: credential %q: %v\n", opts.credentialRef, err)
+		} else {
+			opts.apiKey = key
+		}
+	}
+
 	// --version is a standalone action: print build metadata and exit.
 	if opts.showVersion {
 		fmt.Printf("pigo %s (commit %s, built %s)\n", version, commit, date)
@@ -254,6 +309,13 @@ func applyFileConfig(opts *cliOptions, cfg config.FileConfig, changed func(strin
 	}
 	if cfg.APIKey != "" && !changed("api-key") {
 		opts.apiKey = cfg.APIKey
+	}
+	if cfg.Credential != "" && !changed("api-key") {
+		// A direct api_key in the file wins over a reference when both are set;
+		// a reference only fills the gap (issue #568).
+		if cfg.APIKey == "" {
+			opts.credentialRef = cfg.Credential
+		}
 	}
 	if cfg.Protocol != "" && !changed("protocol") {
 		opts.protocol = cfg.Protocol
@@ -328,6 +390,12 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 	// the REPL/headless paths.
 	if opts.dream {
 		return runDream(ctx, opts, out, errOut)
+	}
+
+	// --github-review is a standalone long-running mode: the isolated webhook
+	// listener (issue #567). It shares nothing with interactive/headless paths.
+	if opts.githubReview {
+		return runGitHubReview(ctx, opts, errOut)
 	}
 
 	// --list-sessions is a standalone action: print and exit.
@@ -482,6 +550,61 @@ func setupExitCode(err error) int {
 // holds the lock) or 1 on failure. Progress and diagnostics go to errOut. The
 // project scope comes from the working directory, which -C/--cwd already applied
 // via os.Chdir before dispatch, so an empty ProjectDir here resolves to cwd.
+// runGitHubReview serves the isolated GitHub ready-for-review webhook
+// (issue #567). The secret is resolved indirectly — the flag names the env var
+// that carries the high-entropy shared secret — so it never sits in config or
+// the process list. The provider/environment resolve through the normal
+// SetupEnv chain, but each review run executes only the read-only tool subset.
+func runGitHubReview(ctx context.Context, opts cliOptions, errOut io.Writer) int {
+	secret := strings.TrimSpace(os.Getenv(strings.TrimSpace(opts.githubWebhookSecretEnv)))
+	if secret == "" {
+		fmt.Fprintf(errOut, "pigo: --github-review requires a webhook secret in $%s\n", opts.githubWebhookSecretEnv)
+		return 2
+	}
+	env, err := run.SetupEnv(opts.model, opts.baseURL, opts.protocol, opts.provider, opts.apiKey, opts.noTools, opts.noSkills, opts.systemPrompt, opts.appendSystemPrompt, opts.memory.Memory.Enabled, run.NewToolPolicy(opts.allowedTools, opts.disallowedTools))
+	if err != nil {
+		fmt.Fprintf(errOut, "pigo: %v\n", err)
+		return setupExitCode(err)
+	}
+	if env.Plugins != nil {
+		defer env.Plugins.Close()
+	}
+	if env.Memory != nil {
+		defer env.Memory.Close()
+	}
+	store, err := headless.SessionStore()
+	if err != nil {
+		fmt.Fprintf(errOut, "pigo: %v\n", err)
+		return 1
+	}
+	srv := &webhook.Server{
+		Secret:       secret,
+		Repo:         opts.githubWebhookRepo,
+		Store:        store,
+		Workspace:    env.Cwd,
+		Model:        opts.model,
+		ProviderName: env.ProviderName,
+		SysPrompt:    env.SysPrompt,
+		Provider:     env.Provider,
+		Runner:       nil, // set below via DefaultRunner once srv is built
+	}
+	srv.Runner = srv.DefaultRunner()
+	fmt.Fprintf(errOut, "pigo: github review webhook listening on %s (repo filter: %q; TLS reverse proxy required in front)\n", opts.githubWebhookAddr, opts.githubWebhookRepo)
+	httpSrv := &http.Server{Addr: opts.githubWebhookAddr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.ListenAndServe() }()
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(errOut, "pigo: webhook listener: %v\n", err)
+			return 1
+		}
+	case <-ctx.Done():
+		_ = httpSrv.Shutdown(context.Background())
+	}
+	return 0
+}
+
 func runDream(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 	projectDir, err := os.Getwd()
 	if err != nil {
