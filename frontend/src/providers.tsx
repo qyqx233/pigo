@@ -34,6 +34,7 @@ function ProviderRow({
   onSaveKey,
   onDeleteKey,
   onRemoveProvider,
+  onEditProvider,
 }: {
   info: ProviderInfo;
   isAdmin: boolean;
@@ -43,8 +44,11 @@ function ProviderRow({
   onSaveKey(scope: "user" | "public", key: string): void;
   onDeleteKey(scope: "user" | "public"): void;
   onRemoveProvider(): void;
+  onEditProvider(next: CustomProvider): Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<CustomProvider>({ name: "", protocol: "openai", baseUrl: "" });
   const [userKey, setUserKey] = useState("");
   const [publicKey, setPublicKey] = useState("");
 
@@ -67,9 +71,72 @@ function ProviderRow({
 
       {open && (
         <div className="provider-detail">
-          {info.custom ? (
+          {info.custom && editing ? (
+            <div className="provider-edit">
+              <label className="field-label" htmlFor={`edit-name-${info.name}`}>名称</label>
+              <input
+                id={`edit-name-${info.name}`}
+                className="settings-input"
+                value={draft.name}
+                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+              />
+              <label className="field-label" htmlFor={`edit-protocol-${info.name}`}>协议</label>
+              <select
+                id={`edit-protocol-${info.name}`}
+                className="settings-input settings-select"
+                value={draft.protocol}
+                onChange={(event) => setDraft({ ...draft, protocol: event.target.value })}
+              >
+                <option value="openai">openai（Chat Completions 兼容）</option>
+                <option value="anthropic">anthropic（Messages 兼容）</option>
+              </select>
+              <label className="field-label" htmlFor={`edit-url-${info.name}`}>Base URL</label>
+              <input
+                id={`edit-url-${info.name}`}
+                className="settings-input"
+                value={draft.baseUrl}
+                onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
+              />
+              {draft.name.trim().toLowerCase() !== info.name && (
+                <p className="security-note">
+                  改名会一并迁移它的 Key、模型、价格和会话；账单记录保留原名。
+                </p>
+              )}
+              <div className="provider-key-row">
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={!draft.name.trim() || !draft.baseUrl.trim()}
+                  onClick={() =>
+                    void onEditProvider({
+                      name: draft.name.trim(),
+                      protocol: draft.protocol,
+                      baseUrl: draft.baseUrl.trim(),
+                    }).then((ok) => ok && setEditing(false))
+                  }
+                >
+                  保存
+                </button>
+                <button type="button" className="ghost-button" onClick={() => setEditing(false)}>
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : info.custom ? (
             <p className="provider-endpoint">
               <code>{info.protocol}</code> · <code>{info.baseUrl}</code>
+              {isAdmin && (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => {
+                    setDraft({ name: info.name, protocol: info.protocol ?? "openai", baseUrl: info.baseUrl ?? "" });
+                    setEditing(true);
+                  }}
+                >
+                  编辑
+                </button>
+              )}
             </p>
           ) : (
             <p className="provider-endpoint">
@@ -318,14 +385,18 @@ export function Providers({
     return list?.credentials.find((item) => item.provider === name)?.hint;
   }
 
-  async function act(run: () => Promise<string>) {
+  // act runs one change and reports it; it resolves true when the change
+  // went through, so a form can close only on success.
+  async function act(run: () => Promise<string>): Promise<boolean> {
     try {
       const text = await run();
       await refresh();
       onChanged();
       report(text, false);
+      return true;
     } catch (cause) {
       report(errorText(cause), true);
+      return false;
     }
   }
 
@@ -368,6 +439,13 @@ export function Providers({
                   if (scope === "user") await api.deleteCredential(info.name);
                   else await api.deleteAdminCredential(info.name);
                   return `已删除 ${info.name} 的${scope === "user" ? "个人" : "公共"} Key`;
+                })
+              }
+              onEditProvider={(next) =>
+                act(async () => {
+                  await api.patchAdminProvider(info.name, next);
+                  const renamed = next.name.toLowerCase() !== info.name;
+                  return renamed ? `已将 ${info.name} 改名为 ${next.name.toLowerCase()}` : `已更新端点 ${info.name}`;
                 })
               }
               onRemoveProvider={() =>

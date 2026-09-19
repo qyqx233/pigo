@@ -251,6 +251,7 @@ func main() {
 	mux.Handle("GET /api/admin/providers", admin(api.handleListCustomProviders))
 	mux.Handle("PUT /api/admin/providers", admin(api.handlePutCustomProvider))
 	mux.Handle("DELETE /api/admin/providers/{name}", admin(api.handleDeleteCustomProvider))
+	mux.Handle("PATCH /api/admin/providers/{name}", admin(api.handlePatchCustomProvider))
 	mux.Handle("PUT /api/admin/prices", admin(api.handlePutPrice))
 	mux.Handle("DELETE /api/admin/prices", admin(api.handleDeletePrice))
 	mux.Handle("GET /api/admin/usage", admin(api.handleAdminUsage))

@@ -2562,6 +2562,23 @@ button {
   margin-top: 14px;
 }
 
+.provider-endpoint .ghost-button {
+  margin-left: 8px;
+  padding: 2px 9px;
+  font-size: 11px;
+}
+
+.provider-edit {
+  margin-top: 11px;
+  padding: 11px 13px;
+  border: 1px dashed #333a46;
+  border-radius: 10px;
+}
+
+.provider-edit .provider-key-row {
+  margin-top: 11px;
+}
+
 .provider-add {
   padding: 13px;
   border: 1px dashed #333a46;

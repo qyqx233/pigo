@@ -564,6 +564,16 @@ export class PigoAPI {
     });
   }
 
+  // patchAdminProvider edits a custom provider in place; a different name
+  // renames it, carrying along its keys, models, prices and sessions.
+  async patchAdminProvider(name: string, body: CustomProvider): Promise<CustomProvider[]> {
+    return this.request<CustomProvider[]>(`/api/admin/providers/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+  }
+
   async deleteAdminProvider(name: string): Promise<CustomProvider[]> {
     return this.request<CustomProvider[]>(`/api/admin/providers/${encodeURIComponent(name)}`, {
       method: "DELETE",
