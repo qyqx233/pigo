@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -234,18 +233,15 @@ func TestHandleMessageRejectsExpiredCustomModel(t *testing.T) {
 	}
 }
 
+// TestHandleListProviders pins the key rule: a provider counts as configured
+// only by a stored key. A key in the server's environment does not enable it.
 func TestHandleListProviders(t *testing.T) {
-	t.Setenv("OPENROUTER_API_KEY", "test-key")
-	// The host may legitimately hold other providers' keys; clear the one we
-	// assert on and restore it afterwards.
-	saved, had := os.LookupEnv("DEEPSEEK_API_KEY")
-	_ = os.Unsetenv("DEEPSEEK_API_KEY")
-	t.Cleanup(func() {
-		if had {
-			_ = os.Setenv("DEEPSEEK_API_KEY", saved)
-		}
-	})
+	t.Setenv("OPENROUTER_API_KEY", "env-key")
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
 	server := newTestServer(t)
+	if err := server.credentials.setPublicKey("deepseek", "sk-stored"); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodGet, "/api/providers", nil)
 	response := httptest.NewRecorder()
 	server.handleListProviders(response, request)
@@ -256,23 +252,18 @@ func TestHandleListProviders(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &providers); err != nil {
 		t.Fatal(err)
 	}
-	if len(providers) == 0 {
-		t.Fatal("no providers returned")
+	sources := map[string]providerInfoResponse{}
+	for _, p := range providers {
+		sources[p.Name] = p
 	}
-	var openrouter, deepseek *providerInfoResponse
-	for i := range providers {
-		switch providers[i].Name {
-		case "openrouter":
-			openrouter = &providers[i]
-		case "deepseek":
-			deepseek = &providers[i]
-		}
+	if p := sources["openrouter"]; p.HasKey || p.Source != "none" {
+		t.Errorf("openrouter with only an env key = %+v, want none", p)
 	}
-	if openrouter == nil || !openrouter.HasKey || !strings.Contains(openrouter.KeyHint, "OPENROUTER_API_KEY") {
-		t.Fatalf("openrouter = %+v", openrouter)
+	if p := sources["deepseek"]; !p.HasKey || p.Source != "public" {
+		t.Errorf("deepseek with a stored key = %+v, want public", p)
 	}
-	if deepseek == nil || deepseek.HasKey {
-		t.Fatalf("deepseek = %+v, want hasKey=false without env", deepseek)
+	if strings.Contains(response.Body.String(), "_API_KEY") {
+		t.Error("the response still names environment variables")
 	}
 }
 

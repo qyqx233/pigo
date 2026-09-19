@@ -179,7 +179,7 @@ func TestHandleModelsLoadsLiveOpenRouterFreeTextModels(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server := &apiServer{modelHTTPClient: upstream.Client(), openRouterModelsURL: upstream.URL}
+	server := openRouterKeyedServer(t, upstream)
 	request := httptest.NewRequest(http.MethodGet, "/api/models", nil)
 	response := httptest.NewRecorder()
 	server.handleModels(response, request)
@@ -195,6 +195,40 @@ func TestHandleModelsLoadsLiveOpenRouterFreeTextModels(t *testing.T) {
 	}
 }
 
+// openRouterKeyedServer is a test server with a stored OpenRouter key whose
+// free catalog comes from upstream.
+func openRouterKeyedServer(t *testing.T, upstream *httptest.Server) *apiServer {
+	t.Helper()
+	server := newTestServer(t)
+	server.modelHTTPClient = upstream.Client()
+	server.openRouterModelsURL = upstream.URL
+	if err := server.credentials.setPublicKey("openrouter", "sk-or"); err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+// TestHandleModelsNeedsOpenRouterKey checks the free catalog is only offered
+// with a stored OpenRouter key — a key in the environment does not count — and
+// that an empty list is [], not null.
+func TestHandleModelsNeedsOpenRouterKey(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "env-key")
+	fetched := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetched = true
+		_, _ = io.WriteString(w, `{"data":[]}`)
+	}))
+	defer upstream.Close()
+	server := newTestServer(t)
+	server.modelHTTPClient = upstream.Client()
+	server.openRouterModelsURL = upstream.URL
+	response := httptest.NewRecorder()
+	server.handleModels(response, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "[]" || fetched {
+		t.Fatalf("status = %d body = %s fetched = %v", response.Code, response.Body.String(), fetched)
+	}
+}
+
 func TestHandleModelsReportsOpenRouterFailure(t *testing.T) {
 	clearProviderKeys(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -202,7 +236,7 @@ func TestHandleModelsReportsOpenRouterFailure(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	server := &apiServer{modelHTTPClient: upstream.Client(), openRouterModelsURL: upstream.URL}
+	server := openRouterKeyedServer(t, upstream)
 	request := httptest.NewRequest(http.MethodGet, "/api/models", nil)
 	response := httptest.NewRecorder()
 	server.handleModels(response, request)

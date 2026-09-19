@@ -274,9 +274,8 @@ export type CustomModelInfo = {
 export type ProviderInfo = {
   name: string;
   hasKey: boolean;
-  keyHint: string;
   // Which tier supplies the key a run would actually use.
-  source?: "user" | "public" | "env" | "none";
+  source?: "user" | "public" | "none";
   // Set for an administrator-defined endpoint.
   custom?: boolean;
   protocol?: string;

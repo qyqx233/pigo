@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -416,11 +415,10 @@ func (s *apiServer) handleDeleteCustomModel(w http.ResponseWriter, r *http.Reque
 // form: whether the server process currently holds its API key, and which env
 // var to set when it does not.
 type providerInfoResponse struct {
-	Name    string `json:"name"`
-	HasKey  bool   `json:"hasKey"`
-	KeyHint string `json:"keyHint"`
+	Name   string `json:"name"`
+	HasKey bool   `json:"hasKey"`
 	// Source names which tier supplies the key that would actually be used for
-	// this request: "user", "public", "env" or "none". It lets the UI tell a
+	// this request: "user", "public" or "none". It lets the UI tell a
 	// user whether they are spending their own quota or the shared pool's.
 	Source string `json:"source"`
 	// Custom marks an administrator-defined endpoint; Protocol and BaseURL are
@@ -433,35 +431,22 @@ type providerInfoResponse struct {
 }
 
 // credentialSource names the tier that would supply providerName's key for
-// userID: "user", "public", "env" or "none". It mirrors credentialStore.resolve
-// so every surface — the provider table, /models — reports the tier a run will
-// really use. envKey is whether the process environment carries a key; custom
-// endpoints pass false, having no registry entry to derive one from.
-func (s *apiServer) credentialSource(userID, providerName string, envKey bool) string {
+// userID: "user", "public" or "none". It mirrors credentialStore.resolve so
+// every surface — the provider table, /models, the pre-turn check — reports
+// what a run will really use.
+//
+// The process environment is deliberately not a tier: a provider is usable on
+// this server only once a key is stored for it (settings → Provider), never
+// because the server happened to start with OPENROUTER_API_KEY or the like in
+// its environment. See spec/admin-and-credentials.md.
+func (s *apiServer) credentialSource(userID, providerName string) string {
 	switch {
 	case s.settings.get().AllowUserKeys && userID != "" && s.credentials.has(userID, providerName):
 		return "user"
 	case s.credentials.has("", providerName):
 		return "public"
-	case envKey:
-		return "env"
 	}
 	return "none"
-}
-
-// envHasKey reports whether the process environment carries a key for a
-// built-in provider. A provider that declares no variables (a local endpoint)
-// needs none, so it counts as keyed.
-func envHasKey(spec provider.ProviderSpec) bool {
-	if len(spec.EnvVars) == 0 {
-		return true
-	}
-	for _, env := range spec.EnvVars {
-		if strings.TrimSpace(os.Getenv(env)) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *apiServer) handleListProviders(w http.ResponseWriter, r *http.Request) {
@@ -469,20 +454,18 @@ func (s *apiServer) handleListProviders(w http.ResponseWriter, r *http.Request) 
 	specs := provider.ProviderSpecs()
 	out := make([]providerInfoResponse, 0, len(specs))
 	for _, spec := range specs {
-		source := s.credentialSource(userID, spec.Name, envHasKey(spec))
+		source := s.credentialSource(userID, spec.Name)
 		out = append(out, providerInfoResponse{
-			Name:    spec.Name,
-			HasKey:  source != "none",
-			KeyHint: provider.APIKeyEnvHint(spec.Name),
-			Source:  source,
+			Name:   spec.Name,
+			HasKey: source != "none",
+			Source: source,
 		})
 	}
 	for _, custom := range s.settings.customProviders() {
-		source := s.credentialSource(userID, custom.Name, false)
+		source := s.credentialSource(userID, custom.Name)
 		out = append(out, providerInfoResponse{
 			Name:           custom.Name,
 			HasKey:         source != "none",
-			KeyHint:        provider.APIKeyEnvHint(custom.Name),
 			Source:         source,
 			Custom:         true,
 			Protocol:       custom.Protocol,
@@ -504,7 +487,7 @@ func (s *apiServer) handleListProviders(w http.ResponseWriter, r *http.Request) 
 // so an outage there does not hide the providers that work.
 func (s *apiServer) usableModels(r *http.Request, userID, filter string) ([]modelResponse, error) {
 	filter = strings.ToLower(strings.TrimSpace(filter))
-	var out []modelResponse
+	out := []modelResponse{} // never null: the web client ranges over it
 	seen := map[string]bool{}
 	add := func(m modelResponse) {
 		if !seen[m.ID] {
@@ -520,8 +503,9 @@ func (s *apiServer) usableModels(r *http.Request, userID, filter string) ([]mode
 		}
 	}
 
+	// OpenRouter's free models still need an OpenRouter key.
 	var freeErr error
-	if filter == "" || filter == "openrouter" {
+	if (filter == "" || filter == "openrouter") && s.credentialSource(userID, "openrouter") != "none" {
 		free, err := s.fetchOpenRouterFreeModels(r)
 		freeErr = err
 		for _, m := range free {
@@ -541,8 +525,8 @@ func (s *apiServer) usableModels(r *http.Request, userID, filter string) ([]mode
 		}
 		ok, known := usable[preset.Provider]
 		if !known {
-			spec, builtin := specs[preset.Provider]
-			ok = builtin && s.credentialSource(userID, preset.Provider, envHasKey(spec)) != "none"
+			_, builtin := specs[preset.Provider]
+			ok = builtin && s.credentialSource(userID, preset.Provider) != "none"
 			usable[preset.Provider] = ok
 		}
 		if ok {

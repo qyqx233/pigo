@@ -20,7 +20,6 @@ import { navigate } from "./route";
 const tiers = [
   { key: "user", label: "我的 Key" },
   { key: "public", label: "公共" },
-  { key: "env", label: "环境变量" },
 ] as const;
 
 // ProviderRow shows one endpoint: which tier is in effect, the address when it
@@ -162,7 +161,7 @@ function ProviderRow({
             </p>
           ) : (
             <p className="provider-endpoint">
-              内置 · 未配置 Key 时回退到环境变量 <code>{info.keyHint}</code>
+              内置 · 需要在这里配置 Key 才能使用（不读取服务端环境变量）
             </p>
           )}
 
@@ -448,7 +447,7 @@ export function Providers({
     <section className="settings-section">
       <PanelHeading
         title="Provider"
-        hint="模型从这里取地址和凭据。同一个 Provider 上，我的 Key 优先于公共，公共优先于环境变量。"
+        hint="模型从这里取地址和凭据。同一个 Provider 上，我的 Key 优先于公共；两者都没有时不可用。"
         icon="PRV"
       />
       {disabled && <p className="security-note">{mine?.reason}</p>}

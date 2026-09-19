@@ -620,16 +620,24 @@ func TestModelListingShowsOnlyUsableModels(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 
+	// An OpenRouter key in the environment does not make its free models usable.
+	t.Setenv("OPENROUTER_API_KEY", "sk-env")
 	listing := server.modelListing(request, "user-1", "")
 	if !strings.Contains(listing, "bonsai2") {
 		t.Errorf("custom model missing:\n%s", listing)
 	}
+	if strings.Contains(listing, "vendor/free-model:free") {
+		t.Errorf("OpenRouter free model listed with only an env key:\n%s", listing)
+	}
+	// A stored key does.
+	if err := server.credentials.setPublicKey("openrouter", "sk-or"); err != nil {
+		t.Fatal(err)
+	}
+	listing = server.modelListing(request, "user-1", "")
 	if !strings.Contains(listing, "vendor/free-model:free") {
 		t.Errorf("OpenRouter free model missing:\n%s", listing)
 	}
 	// Static OpenRouter presets (mostly paid) never show, key or not.
-	t.Setenv("OPENROUTER_API_KEY", "sk-env")
-	listing = server.modelListing(request, "user-1", "")
 	if strings.Contains(listing, "openai/gpt-4o") {
 		t.Errorf("static OpenRouter presets must not be listed:\n%s", listing)
 	}

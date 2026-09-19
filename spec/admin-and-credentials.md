@@ -1,5 +1,14 @@
 # SPEC: 管理员、公共配置与用户自带凭据
 
+> **变更（2026-09-19）：不再从环境变量读取 provider Key。** 下文第三级"进程环境变量"已取消：只有在 设置 → Provider 里存过 Key（个人或公共）的 provider 才可用；服务端启动时带的 `OPENROUTER_API_KEY`、`DEEPSEEK_API_KEY` 等一律忽略，不再让 provider 自动可用，也不会被用于请求。
+>
+> - 模型列表（下拉、`/models`）只列出有 Key 的 provider 的模型，OpenRouter 免费目录同样需要 OpenRouter Key。
+> - 会话的 provider 没有 Key 时，这一轮在调用模型前就被拒绝，提示去 设置 → Provider 配置。
+> - 运行时的 Key 每次调用都从存储里读，保存或删除 Key 后，已加载的会话从下一次调用起生效。
+> - 实现：`credentialSource` 只返回 user / public / none；运行时不再使用会回退到环境变量的 `provider.CredentialStore`，改用服务端自己的 `apiKeyFunc`（`cmd/pigo-server/hostloop.go`）。
+> - 历史账本里 `key_source=env` 的记录照旧按平台承担计费。
+> - 环境变量里的非 Key 配置不受影响：`PIGO_*`、`*_BASE_URL`，以及内置 websearch 的 `TAVILY_API_KEY` / `BRAVE_API_KEY`（这些是工具的配置，不是 provider 的 Key）。
+
 - 状态：全部四步已实现
 - 日期：2026-09-18
 - 背景：pigo-server 目前的 provider key 只来自服务进程的环境变量，所有用户共用同一把；模型下拉只有 OpenRouter 免费目录；没有角色概念，`userRecord` 只有 `{ID, Username, PasswordHash, CreatedAt}`。

@@ -30,8 +30,9 @@ type turnInfo struct {
 	username  string
 	sessionID string
 	turnID    string
-	// keySource is where the provider key came from: "user", "public" or
-	// "env" (see credentialSource).
+	// keySource is where the provider key came from: "user" or "public"
+	// (see credentialSource). Entries written before keys stopped coming from
+	// the environment may also say "env".
 	keySource string
 	// emit reports each call's cost to the client as it finishes; nil when
 	// the request is not streamed.

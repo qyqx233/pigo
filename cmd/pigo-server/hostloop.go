@@ -52,13 +52,15 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 		return err
 	}
 	managed.meta.Provider = providerName
-	creds := s.credentialStoreFor(managed, providerName)
 	thinking := agentcore.ThinkingLevel(managed.meta.Thinking)
 	if thinking == "" {
 		thinking = agentcore.ThinkingMedium
 	}
 	reg := run.ToolRegistry(tools)
-	managed.runCfg = run.NewConfig(managed.meta.Model, providerName, thinking, prov, creds, reg, run.TodoReminders(tools), nil)
+	managed.runCfg = run.NewConfig(managed.meta.Model, providerName, thinking, prov, provider.NewCredentialStore(nil), reg, run.TodoReminders(tools), nil)
+	// NewConfig's store falls back to the process environment; the server's
+	// keys come from its own store only.
+	managed.runCfg.GetAPIKey = s.apiKeyFunc(managed.meta.UserID)
 	s.meterStreams(managed, prov, providerName)
 	msgs := s.loadTranscript(managed)
 	managed.agentCtx = &agentcore.AgentContext{
@@ -134,6 +136,10 @@ func hasHostRead(tools []agentcore.AgentTool) bool {
 func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, prompt string, emit func(streamEvent)) (string, error) {
 	managed.mu.Lock()
 	if err := s.ensureHostLoop(managed); err != nil {
+		managed.mu.Unlock()
+		return "", err
+	}
+	if err := s.errNoProviderKey(managed.meta.UserID, managed.meta.Provider); err != nil {
 		managed.mu.Unlock()
 		return "", err
 	}
@@ -263,7 +269,6 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 		return err
 	}
 	managed.meta.Provider = providerName
-	creds := s.credentialStoreFor(managed, providerName)
 	thinking := agentcore.ThinkingLevel(managed.meta.Thinking)
 	if thinking == "" {
 		thinking = agentcore.ThinkingMedium
@@ -272,7 +277,7 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 	managed.runCfg.Provider = providerName
 	managed.runCfg.ThinkingLevel = thinking
 	s.meterStreams(managed, prov, providerName)
-	managed.runCfg.GetAPIKey = creds.GetAPIKey
+	managed.runCfg.GetAPIKey = s.apiKeyFunc(managed.meta.UserID)
 	return nil
 }
 
@@ -310,35 +315,27 @@ func (s *apiServer) newTurn(managed *managedSession, emit func(streamEvent)) *tu
 
 // keySource reports where a call's key comes from, which decides who pays.
 func (s *apiServer) keySource(userID, providerName string) string {
-	envKey := false
-	if spec, ok := provider.LookupProviderSpec(providerName); ok {
-		envKey = envHasKey(spec)
-	}
-	return s.credentialSource(userID, providerName, envKey)
+	return s.credentialSource(userID, providerName)
 }
 
-// credentialStoreFor builds the provider credential store for one session,
-// applying the precedence the deployment promises: the session owner's own key,
-// then the administrator's shared pool, then nothing — which leaves the store
-// to fall back to the process environment exactly as it did before this
-// feature existed.
-//
-// The override is resolved per session rather than once per process because the
-// owner and the administrator can both change a key while the server runs;
-// applyHostConfig re-runs this on the next request, so an idle session picks up
-// a new key without being recreated.
-func (s *apiServer) credentialStoreFor(managed *managedSession, providerName string) *provider.CredentialStore {
-	creds := provider.NewCredentialStore(nil)
-	if s.credentials == nil {
-		return creds
+// apiKeyFunc is a session's key lookup: the owner's own key, then the shared
+// pool, then nothing — never the process environment (credentialSource). It is
+// resolved on every call, so a key saved or deleted while a session is loaded
+// applies from its next call, summary calls included.
+func (s *apiServer) apiKeyFunc(userID string) func(context.Context, string) string {
+	return func(_ context.Context, providerName string) string {
+		return s.credentials.resolve(userID, providerName, s.settings.get().AllowUserKeys)
 	}
-	// SetOverride ignores an empty key, so the environment fallback survives.
-	creds.SetOverride(providerName, s.credentials.resolve(
-		managed.meta.UserID,
-		providerName,
-		s.settings.get().AllowUserKeys,
-	))
-	return creds
+}
+
+// errNoProviderKey is why a turn is refused before it starts: its provider has
+// no key this user can use. Without the check the provider's own error would
+// point at an environment variable the server no longer reads.
+func (s *apiServer) errNoProviderKey(userID, providerName string) error {
+	if s.credentialSource(userID, providerName) != "none" {
+		return nil
+	}
+	return fmt.Errorf("provider %s 没有可用的 API Key：在 设置 → Provider 里填写个人 Key，或请管理员配置公共 Key", providerName)
 }
 
 // providerResolver maps a model and provider name onto a wire driver. It is

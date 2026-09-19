@@ -78,7 +78,9 @@ type ledgerEntry struct {
 	UsageAnomaly    bool     `json:"usageAnomaly,omitempty"`
 }
 
-// billedToFor maps where a call's key came from to who pays for it.
+// billedToFor maps where a call's key came from to who pays for it: a user's
+// own key bills them, anything else — the shared pool, or the environment in
+// entries from before keys stopped coming from there — the platform.
 func billedToFor(keySource string) string {
 	if keySource == "user" {
 		return billedSelf

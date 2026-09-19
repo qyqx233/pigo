@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -403,7 +404,7 @@ func TestCredentialAPIDisabledReportsReason(t *testing.T) {
 }
 
 // TestProvidersReportCredentialSource verifies /api/providers names the tier a
-// run would really use.
+// run would really use — the process environment is not one.
 func TestProvidersReportCredentialSource(t *testing.T) {
 	server := newTestServer(t)
 	t.Setenv("GROQ_API_KEY", "sk-from-env")
@@ -427,11 +428,44 @@ func TestProvidersReportCredentialSource(t *testing.T) {
 	for name, want := range map[string]string{
 		"openai":   "user",
 		"deepseek": "public",
-		"groq":     "env",
+		"groq":     "none", // a key in the environment is not a tier
 		"mistral":  "none",
 	} {
 		if sources[name] != want {
 			t.Errorf("source[%s] = %q, want %q", name, sources[name], want)
 		}
+	}
+}
+
+// TestRunKeysIgnoreTheEnvironment checks the run side of the key rule: the key
+// lookup a session's run uses reads only the stored keys, and a turn whose
+// provider has none is refused before any model call, saying where to add one.
+func TestRunKeysIgnoreTheEnvironment(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "sk-env")
+	server := newTestServer(t)
+	lookup := server.apiKeyFunc("user-1")
+	if got := lookup(context.Background(), "openrouter"); got != "" {
+		t.Errorf("key from the environment reached the run: %q", got)
+	}
+	if err := server.errNoProviderKey("user-1", "openrouter"); err == nil || !strings.Contains(err.Error(), "设置 → Provider") {
+		t.Errorf("errNoProviderKey = %v", err)
+	}
+
+	// A turn is refused up front, with that message.
+	id := createSession(t, server)
+	managed, _ := server.getSession(id)
+	if _, err := server.runHostLoop(context.Background(), managed, "hi", nil); err == nil || !strings.Contains(err.Error(), "没有可用的 API Key") {
+		t.Errorf("turn without a key: %v", err)
+	}
+
+	// A stored key is used, and applies without reloading the session.
+	if err := server.credentials.setPublicKey("openrouter", "sk-stored"); err != nil {
+		t.Fatal(err)
+	}
+	if got := lookup(context.Background(), "openrouter"); got != "sk-stored" {
+		t.Errorf("stored key = %q", got)
+	}
+	if err := server.errNoProviderKey("user-1", "openrouter"); err != nil {
+		t.Errorf("with a stored key: %v", err)
 	}
 }
