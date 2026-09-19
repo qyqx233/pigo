@@ -45,6 +45,10 @@ config.toml
 /pigo-server.log
 /pigo-server.pid
 /start.sh
+# The frontend build embedded into pigo-server; built by `pnpm --dir frontend build`.
+# Only the placeholder is tracked, so //go:embed compiles in a fresh checkout.
+/cmd/pigo-server/web/dist/*
+!/cmd/pigo-server/web/dist/.gitkeep
 /tools.yaml
 
 # goreleaser output
