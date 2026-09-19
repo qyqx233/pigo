@@ -164,6 +164,9 @@ func (s *apiServer) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The usage ledger is deliberately left alone: it is the record of what
+	// was spent, and reports show the calls under the deleted user's name.
+
 	s.logAdminAction(r, "delete user", user.Username)
 	writeJSON(w, http.StatusOK, deleteUserResponse{
 		Username: user.Username,

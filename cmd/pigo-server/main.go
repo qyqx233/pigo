@@ -60,6 +60,8 @@ type apiServer struct {
 	customModels        *customModelStore
 	credentials         *credentialStore
 	settings            *settingsStore
+	ledger              *ledgerStore
+	meter               *meter
 
 	mu       sync.RWMutex
 	sessions map[string]*managedSession
@@ -108,6 +110,8 @@ type streamEvent struct {
 	Phase   string `json:"phase,omitempty"`
 	ID      string `json:"id,omitempty"`
 	IsError bool   `json:"isError,omitempty"`
+	// Usage is the "usage" event's payload: one model call's tokens and cost.
+	Usage *usageReport `json:"usage,omitempty"`
 }
 
 func main() {
@@ -159,6 +163,7 @@ func main() {
 	mux.Handle("GET /api/sessions/{id}/commands", api.requirePrincipal(http.HandlerFunc(api.handleCommands)))
 	mux.Handle("GET /api/sessions/{id}/messages", api.requirePrincipal(http.HandlerFunc(api.handleSessionMessages)))
 	mux.Handle("POST /api/sessions/{id}/messages", api.requirePrincipal(http.HandlerFunc(api.handleMessage)))
+	mux.Handle("GET /api/sessions/{id}/usage", api.requirePrincipal(http.HandlerFunc(api.handleSessionUsage)))
 	mux.Handle("GET /api/sessions/{id}/files", api.requirePrincipal(http.HandlerFunc(api.handleListFiles)))
 	mux.Handle("GET /api/sessions/{id}/files/raw", api.requirePrincipal(http.HandlerFunc(api.handleReadFile)))
 	mux.Handle("GET /api/models", api.requirePrincipal(http.HandlerFunc(api.handleModels)))
@@ -166,6 +171,11 @@ func main() {
 	mux.Handle("GET /api/providers", api.requirePrincipal(http.HandlerFunc(api.handleListProviders)))
 	mux.Handle("POST /api/custom-models", api.requirePrincipal(http.HandlerFunc(api.handleAddCustomModel)))
 	mux.Handle("DELETE /api/custom-models/{id...}", api.requirePrincipal(http.HandlerFunc(api.handleDeleteCustomModel)))
+
+	// Billing: the price table is readable by everyone; a user sees their own
+	// usage.
+	mux.Handle("GET /api/prices", api.requirePrincipal(http.HandlerFunc(api.handleListPrices)))
+	mux.Handle("GET /api/usage", api.requirePrincipal(http.HandlerFunc(api.handleMyUsage)))
 
 	// A user's own provider keys.
 	mux.Handle("GET /api/credentials", api.requirePrincipal(http.HandlerFunc(api.handleListCredentials)))
@@ -188,6 +198,9 @@ func main() {
 	mux.Handle("GET /api/admin/providers", admin(api.handleListCustomProviders))
 	mux.Handle("PUT /api/admin/providers", admin(api.handlePutCustomProvider))
 	mux.Handle("DELETE /api/admin/providers/{name}", admin(api.handleDeleteCustomProvider))
+	mux.Handle("PUT /api/admin/prices", admin(api.handlePutPrice))
+	mux.Handle("DELETE /api/admin/prices", admin(api.handleDeletePrice))
+	mux.Handle("GET /api/admin/usage", admin(api.handleAdminUsage))
 	mux.Handle("GET /api/admin/users", admin(api.handleListUsers))
 	mux.Handle("POST /api/admin/users/{id}/disable", admin(api.handleSetUserDisabled))
 	mux.Handle("POST /api/admin/users/{id}/password", admin(api.handleResetUserPassword))
@@ -266,6 +279,10 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 	if !credentials.enabled() {
 		log.Printf("pigo-server: %s is not set; stored provider API keys are disabled (existing credentials.json is left untouched)", credentialSecretEnv)
 	}
+	ledger, err := newLedgerStore(cfg.dataDir)
+	if err != nil {
+		return nil, err
+	}
 	s := &apiServer{
 		config:              cfg,
 		sandbox:             sandbox,
@@ -279,6 +296,8 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 		customModels:        customModels,
 		credentials:         credentials,
 		settings:            settings,
+		ledger:              ledger,
+		meter:               &meter{ledger: ledger, settings: settings},
 		sessions:            sessions,
 	}
 	if cfg.idleTimeout > 0 || cfg.emptySessionTTL > 0 {
@@ -565,8 +584,23 @@ func (s *apiServer) streamMessage(ctx context.Context, w http.ResponseWriter, id
 
 	encoder := json.NewEncoder(w)
 	var writeErr error
+	// emit is called from more than one goroutine: the run's event drain, and
+	// the billing meter reporting usage as each model call finishes. The mutex
+	// keeps their lines from interleaving on the wire.
+	//
+	// finished closes the stream to late writers: once the handler returns,
+	// the ResponseWriter must not be touched.
+	var emitMu sync.Mutex
+	finished := false
+	defer func() {
+		emitMu.Lock()
+		finished = true
+		emitMu.Unlock()
+	}()
 	emit := func(event streamEvent) {
-		if writeErr != nil {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		if finished || writeErr != nil {
 			return
 		}
 		if err := encoder.Encode(event); err != nil {
@@ -580,7 +614,10 @@ func (s *apiServer) streamMessage(ctx context.Context, w http.ResponseWriter, id
 		emit(streamEvent{Type: "delta", Text: prefix + "\n\n"})
 	}
 	reply, err := s.runMessage(ctx, managed, prompt, emit)
-	if writeErr != nil {
+	emitMu.Lock()
+	failed := writeErr != nil
+	emitMu.Unlock()
+	if failed {
 		return
 	}
 	if err != nil {

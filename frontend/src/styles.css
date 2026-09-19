@@ -2787,3 +2787,272 @@ button {
   color: #1d2b22;
   border-color: #c3cbbf;
 }
+
+/* --- billing ---------------------------------------------------------------- */
+
+/* One quiet line under a reply: the turn's tokens and cost. Always visible,
+   unlike the copy button, because it is information rather than an action. */
+.usage-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 11px;
+  margin-top: 6px;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  cursor: default;
+}
+
+.usage-line strong {
+  color: #9aa2b1;
+  font-weight: 650;
+}
+
+.usage-line em,
+.usage-tag {
+  padding: 0 6px;
+  color: #9299a9;
+  border-radius: 999px;
+  background: rgb(146 153 169 / 12%);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.usage-tag {
+  margin-left: 6px;
+}
+
+.usage-line .usage-warn {
+  color: #d3b98a;
+  background: rgb(211 185 138 / 14%);
+}
+
+.session-cost {
+  padding: 6px 10px;
+  color: #9aefad;
+  border: 1px solid rgb(120 224 143 / 22%);
+  border-radius: 999px;
+  background: rgb(120 224 143 / 6%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.session-cost:hover {
+  border-color: rgb(120 224 143 / 45%);
+}
+
+.usage-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 14px;
+  color: #9299a9;
+  font-size: 12px;
+}
+
+.usage-filters label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.usage-filters .settings-input {
+  width: auto;
+  height: 32px;
+  padding: 0 8px;
+}
+
+.usage-presets {
+  display: flex;
+  gap: 5px;
+}
+
+.usage-metrics {
+  margin-bottom: 14px;
+}
+
+.usage-metrics .metric strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 17px;
+}
+
+.usage-block {
+  margin-top: 16px;
+}
+
+.usage-block h4,
+.price-form h4 {
+  margin: 0 0 8px;
+  color: #c5cbd6;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.usage-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #262d39;
+  border-radius: 10px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 7px 10px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid #1c222c;
+}
+
+.usage-table th:first-child,
+.usage-table td:first-child {
+  text-align: left;
+}
+
+.usage-table th {
+  color: #7f8796;
+  font-weight: 600;
+  background: #11151d;
+}
+
+.usage-table td {
+  color: #c5cbd6;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.usage-row-muted td {
+  color: #7f8796;
+}
+
+.usage-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.usage-link {
+  padding: 0;
+  color: #9aefad;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.usage-link:hover {
+  text-decoration: underline;
+}
+
+.usage-unpriced {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  color: #d3b98a;
+  border: 1px solid rgb(211 185 138 / 25%);
+  border-radius: 10px;
+  background: rgb(211 185 138 / 7%);
+  font-size: 11.5px;
+}
+
+.usage-unpriced span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.price-form {
+  margin-top: 18px;
+  padding: 13px;
+  border: 1px dashed #333a46;
+  border-radius: 10px;
+}
+
+.price-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.price-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #9299a9;
+  font-size: 11.5px;
+}
+
+@media (max-width: 680px) {
+  .price-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .session-cost {
+    display: none;
+  }
+}
+
+[data-theme="light"] .usage-line {
+  color: #8a93a1;
+}
+
+[data-theme="light"] .usage-line strong {
+  color: #4b5563;
+}
+
+[data-theme="light"] .session-cost {
+  color: #24723b;
+  border-color: rgb(36 114 59 / 25%);
+  background: rgb(36 114 59 / 6%);
+}
+
+[data-theme="light"] .usage-table-wrap {
+  border-color: #dde2da;
+}
+
+[data-theme="light"] .usage-table th {
+  color: #697587;
+  background: #f4f6f1;
+}
+
+[data-theme="light"] .usage-table th,
+[data-theme="light"] .usage-table td {
+  border-bottom-color: #e3e8e1;
+}
+
+[data-theme="light"] .usage-table td {
+  color: #29332d;
+}
+
+[data-theme="light"] .usage-row-muted td {
+  color: #8a93a1;
+}
+
+[data-theme="light"] .usage-block h4,
+[data-theme="light"] .price-form h4 {
+  color: #29332d;
+}
+
+[data-theme="light"] .usage-link {
+  color: #24723b;
+}
+
+[data-theme="light"] .usage-unpriced {
+  color: #8a6420;
+}
+
+[data-theme="light"] .price-form {
+  border-color: #d3dad0;
+}

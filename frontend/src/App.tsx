@@ -6,6 +6,7 @@ import {
   ThreadPrimitive,
   unstable_useSlashCommandAdapter,
   useAui,
+  useAuiState,
   useLocalRuntime,
   type ChatModelAdapter,
   type ThreadMessage,
@@ -13,6 +14,7 @@ import {
   type Unstable_SlashCommand,
 } from "@assistant-ui/react";
 import { AdminSettings, AdminUsers } from "./admin";
+import { Prices, SessionCost, UsageLine, UsagePanel, totalsOf } from "./billing";
 import { navigate, navigateEvent, parsePath, type Route } from "./route";
 import { Models } from "./models";
 import { Providers } from "./providers";
@@ -31,6 +33,9 @@ import {
 import {
   APIError,
   PigoAPI,
+  type CallUsage,
+  type TurnUsage,
+  type UsageTotals,
   type HistoryMessage,
   type CustomModelInfo,
   type ModelInfo,
@@ -52,6 +57,9 @@ type PigoContextValue = {
   models: ModelInfo[];
   modelsError: string;
   reloadModels(): Promise<void>;
+  // sessionCost is the open session's running total, updated live as each
+  // model call reports its cost.
+  sessionCost: UsageTotals | null;
   error: string;
   // notice is transient run status (currently a retry after a rate-limited or
   // overloaded request). Empty when there is nothing to say.
@@ -98,6 +106,7 @@ function toThreadMessages(messages: HistoryMessage[]): ThreadMessageLike[] {
       ...(message.role === "assistant"
         ? { status: { type: "complete" as const, reason: "stop" as const } }
         : {}),
+      ...(message.usage ? { metadata: { custom: { usage: message.usage } } } : {}),
     }));
 }
 
@@ -114,6 +123,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
   const [modelsError, setModelsError] = useState("");
   const [error, setError] = useState("");
   const [runNotice, setRunNotice] = useState("");
+  const [sessionCost, setSessionCost] = useState<UsageTotals | null>(null);
   const [commandBrowserOpen, setCommandBrowserOpen] = useState(false);
   const [theme, setThemeState] = useState<Theme>(() => {
     let initial: Theme = "dark";
@@ -150,12 +160,26 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
             };
             return;
           }
+          // Each model call of the turn reports its cost as it finishes. They
+          // are summed onto the reply (and the session total) as they arrive,
+          // so the figure is live rather than appearing when the turn ends.
+          const calls: CallUsage[] = [];
+          const onUsage = (call: CallUsage) => {
+            calls.push(call);
+            setSessionCost((current) => addCall(current, call));
+          };
+          const withUsage = (text: string) => ({
+            content: [{ type: "text" as const, text }],
+            ...(calls.length > 0 ? { metadata: { custom: { usage: totalsOf([...calls]) } } } : {}),
+          });
           let emitted = false;
-          for await (const text of api.stream(prompt, abortSignal, setRunNotice)) {
+          let last = "";
+          for await (const text of api.stream(prompt, abortSignal, setRunNotice, onUsage)) {
             emitted = true;
-            yield { content: [{ type: "text", text }] };
+            last = text;
+            yield withUsage(text);
           }
-          if (!emitted) yield { content: [{ type: "text", text: "" }] };
+          if (!emitted || calls.length > 0) yield withUsage(last);
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : String(cause));
           throw cause;
@@ -168,6 +192,9 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
             setSession(nextSession);
             setCommands(nextCommands);
             setSessions(nextSessions);
+            // The ledger's figure replaces the live sum, which cannot see
+            // calls from another tab.
+            return api.sessionUsage(nextSession.id).then(setSessionCost);
           })
           .catch(() => undefined);
       },
@@ -195,6 +222,8 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     }
     const history = await api.history(next.id);
     runtime.thread.reset(toThreadMessages(history));
+    setSessionCost(null);
+    void api.sessionUsage(next.id).then(setSessionCost).catch(() => undefined);
     try {
       setCommands(await api.commands());
     } catch {
@@ -281,6 +310,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     setCommands([]);
     setModels([]);
     setModelsError("");
+    setSessionCost(null);
     setError("");
   }
 
@@ -362,6 +392,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
         models,
         modelsError,
         reloadModels: loadModels,
+        sessionCost,
         error,
         notice: runNotice,
         theme,
@@ -382,6 +413,28 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
       </AssistantRuntimeProvider>
     </PigoContext.Provider>
   );
+}
+
+// addCall folds one live call into the session total.
+function addCall(current: UsageTotals | null, call: CallUsage): UsageTotals {
+  const base: UsageTotals = current ?? {
+    calls: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0,
+    cost: 0, platformCost: 0, selfCost: 0, unpriced: 0, incomplete: 0,
+  };
+  const { details: _details, ...one } = totalsOf([call]);
+  return {
+    calls: base.calls + one.calls,
+    input: base.input + one.input,
+    cacheRead: base.cacheRead + one.cacheRead,
+    cacheWrite: base.cacheWrite + one.cacheWrite,
+    output: base.output + one.output,
+    reasoning: base.reasoning + one.reasoning,
+    cost: base.cost + one.cost,
+    platformCost: base.platformCost + one.platformCost,
+    selfCost: base.selfCost + one.selfCost,
+    unpriced: base.unpriced + one.unpriced,
+    incomplete: base.incomplete + one.incomplete,
+  };
 }
 
 function usePigo() {
@@ -508,6 +561,7 @@ function Shell() {
     setCommandBrowserOpen,
     newSession,
     logout,
+    sessionCost,
   } = usePigo();
   const [historyOpen, setHistoryOpen] = useState(false);
   const route = useRoute();
@@ -531,6 +585,7 @@ function Shell() {
           </span>
         </div>
         <div className="topbar-spacer" />
+        <SessionCost totals={sessionCost} />
         {session && <ModelPicker />}
         <button className="secondary-button history-button" type="button" onClick={() => setHistoryOpen(true)}>
           历史会话
@@ -826,6 +881,8 @@ const settingsGroups: SettingsGroup[] = [
       { key: "providers", label: "Provider" },
       { key: "models", label: "模型" },
       { key: "workspace", label: "工作区" },
+      { key: "usage", label: "用量" },
+      { key: "prices", label: "模型价格" },
       { key: "runtime", label: "运行状态" },
     ],
   },
@@ -835,6 +892,7 @@ const settingsGroups: SettingsGroup[] = [
     tabs: [
       { key: "admin", label: "部署" },
       { key: "admin-users", label: "用户" },
+      { key: "admin-usage", label: "全员用量" },
     ],
   },
 ];
@@ -1011,6 +1069,11 @@ function SettingsPage({ tab }: { tab: string }) {
 
         {user?.admin && active === "admin" && <AdminSettings api={api} />}
         {user?.admin && active === "admin-users" && <AdminUsers api={api} />}
+        {user?.admin && active === "admin-usage" && <UsagePanel api={api} admin />}
+        {active === "usage" && <UsagePanel api={api} />}
+        {active === "prices" && (
+          <Prices api={api} isAdmin={!!user?.admin} providers={providers} models={datalistModels} />
+        )}
 
         {active === "runtime" && (
           <section className="settings-section">
@@ -1306,6 +1369,7 @@ function UserMessage() {
 
 function AssistantMessage() {
   const { error } = usePigo();
+  const usage = useAuiState((state) => (state.message.metadata?.custom as { usage?: TurnUsage } | undefined)?.usage);
   return (
     <MessagePrimitive.Root className="message-row assistant-row">
       <div className="assistant-avatar" aria-hidden="true">
@@ -1318,6 +1382,7 @@ function AssistantMessage() {
             <span className="message-error">{error || "生成失败，请重试。"}</span>
           </MessagePrimitive.Error>
         </div>
+        {usage && <UsageLine usage={usage} />}
         <ActionBarPrimitive.Root className="message-actions" hideWhenRunning>
           <ActionBarPrimitive.Copy className="message-action">
             复制

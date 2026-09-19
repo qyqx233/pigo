@@ -31,7 +31,101 @@ export type HistoryMessage = {
   toolCallId?: string;
   arguments?: unknown;
   isError?: boolean;
+  // The turn's model usage, on the turn's last assistant message.
+  usage?: TurnUsage;
 };
+
+// --- billing ------------------------------------------------------------------
+
+// CallUsage is one model call: the "usage" stream event, and one detail row of a
+// turn. Token counts never overlap: input excludes the cache. Cost is in yuan.
+export type CallUsage = {
+  kind: "chat" | "compaction";
+  status: "ok" | "error" | "aborted" | "unreported";
+  provider: string;
+  model: string;
+  responseId?: string;
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  reasoning?: number;
+  priced: boolean;
+  cost: number;
+  billedTo: "platform" | "self";
+};
+
+export type UsageTotals = {
+  calls: number;
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  reasoning: number;
+  cost: number;
+  platformCost: number;
+  selfCost: number;
+  // unpriced: calls of models without a price (counted at zero).
+  // incomplete: calls whose usage is unknown (aborted or never reported).
+  unpriced: number;
+  incomplete: number;
+};
+
+export type TurnUsage = UsageTotals & { details: CallUsage[] };
+
+export type UsageGroup = UsageTotals & { key: string; label?: string; deleted?: boolean };
+
+export type UsageEntry = {
+  id: string;
+  at: string;
+  userId: string;
+  username: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  model: string;
+  responseModel?: string;
+  kind: string;
+  status: string;
+  billedTo: string;
+  keySource: string;
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  priced: boolean;
+  costYuan: number;
+  usageAnomaly?: boolean;
+};
+
+export type UsageReport = {
+  from: string;
+  to: string;
+  currency: string;
+  totals: UsageTotals;
+  byDay: UsageGroup[];
+  byModel: UsageGroup[];
+  byUser?: UsageGroup[];
+  unpriced: { provider: string; model: string; calls: number }[];
+  recent: UsageEntry[];
+};
+
+export type UsageQuery = { from?: string; to?: string; user?: string; provider?: string; model?: string; session?: string };
+
+// ModelPrice is one row of the price table, in yuan per million tokens. Unset
+// cache prices are charged at the input price.
+export type ModelPrice = {
+  provider: string;
+  model: string;
+  input: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  output: number;
+  updatedBy?: string;
+  updatedAt?: string;
+};
+
+export type PriceList = { currency: string; unit: string; prices: ModelPrice[] };
 
 export type WorkspaceEntry = { name: string; dir: boolean; size: number };
 
@@ -119,7 +213,10 @@ type StreamEvent = {
   // "notice" carries transient run status (currently only a retry after a
   // rate-limited or overloaded request): no conversation content, safe to
   // ignore, and worth surfacing because the run pauses for several seconds.
-  type: "delta" | "done" | "error" | "tool" | "notice";
+  // "usage" reports one model call's tokens and cost as the call finishes; a
+  // turn with tool use or compaction sends several.
+  type: "delta" | "done" | "error" | "tool" | "notice" | "usage";
+  usage?: CallUsage;
   text?: string;
   error?: string;
   tool?: string;
@@ -382,6 +479,49 @@ export class PigoAPI {
     });
   }
 
+  // --- billing ----------------------------------------------------------------
+
+  async prices(): Promise<PriceList> {
+    return this.request<PriceList>("/api/prices", { headers: this.headers() });
+  }
+
+  async putPrice(price: ModelPrice): Promise<PriceList> {
+    return this.request<PriceList>("/api/admin/prices", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(price),
+    });
+  }
+
+  // The row is named in the query string: model ids contain slashes.
+  async deletePrice(provider: string, model: string): Promise<PriceList> {
+    return this.request<PriceList>(`/api/admin/prices?${new URLSearchParams({ provider, model })}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  async usage(query: UsageQuery, admin = false): Promise<UsageReport> {
+    return this.request<UsageReport>(`${admin ? "/api/admin/usage" : "/api/usage"}?${usageParams(query)}`, {
+      headers: this.headers(),
+    });
+  }
+
+  async sessionUsage(id: string): Promise<UsageTotals> {
+    return this.request<UsageTotals>(`/api/sessions/${encodeURIComponent(id)}/usage`, { headers: this.headers() });
+  }
+
+  async downloadUsage(query: UsageQuery, admin = false): Promise<void> {
+    const response = await fetch(
+      `${admin ? "/api/admin/usage" : "/api/usage"}?${usageParams({ ...query, format: "csv" })}`,
+      { headers: this.headers(), credentials: "same-origin" },
+    );
+    if (!response.ok) throw new APIError(await errorMessage(response), response.status);
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    const name = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "usage.csv";
+    saveBlob(await response.blob(), name);
+  }
+
   async updateSession(settings: SessionSettings): Promise<SessionInfo> {
     const session = this.requireSession();
     const current = await this.request<SessionInfo>(
@@ -412,23 +552,21 @@ export class PigoAPI {
       { headers: this.headers(), credentials: "same-origin" },
     );
     if (!response.ok) throw new APIError(await errorMessage(response), response.status);
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = path.split("/").pop() || "file";
-    link.click();
-    URL.revokeObjectURL(url);
+    saveBlob(await response.blob(), path.split("/").pop() || "file");
   }
 
   // onNotice receives transient run status (a retry after a rate-limited or
   // overloaded request). It is a callback rather than a yielded value because a
   // notice is not part of the reply: the run pauses for seconds, and the UI
   // needs to say so without writing anything into the assistant's message.
+  //
+  // onUsage receives each model call's usage as it finishes, for the same
+  // reason: it describes the reply rather than being part of it.
   async *stream(
     prompt: string,
     signal: AbortSignal,
     onNotice?: (text: string) => void,
+    onUsage?: (usage: CallUsage) => void,
   ): AsyncGenerator<string> {
     const session = this.requireSession();
     const response = await fetch(
@@ -458,6 +596,7 @@ export class PigoAPI {
         const event = JSON.parse(line) as StreamEvent;
         if (event.type === "error") throw new Error(event.error || "请求失败");
         if (event.type === "notice") onNotice?.(event.text ?? "");
+        if (event.type === "usage" && event.usage) onUsage?.(event.usage);
         if (event.type === "delta") {
           // Output is flowing again, so any pending notice is over. Sent on
           // every delta (not just the first) because one run streams several
@@ -504,6 +643,23 @@ export class PigoAPI {
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
   }
+}
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function usageParams(query: Record<string, string | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value) params.set(key, value);
+  }
+  return params.toString();
 }
 
 async function errorMessage(response: Response): Promise<string> {

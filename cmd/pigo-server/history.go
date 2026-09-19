@@ -24,6 +24,12 @@ type historyMessage struct {
 	ToolCallID string    `json:"toolCallId,omitempty"`
 	Arguments  any       `json:"arguments,omitempty"`
 	IsError    bool      `json:"isError,omitempty"`
+	// Usage is the turn's model usage and cost, on the turn's last assistant
+	// message (see attachTurnUsage).
+	Usage *turnUsage `json:"usage,omitempty"`
+
+	// turn numbers the user turns: it goes up with each user message.
+	turn int
 }
 
 func (s *apiServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +76,9 @@ func (s *apiServer) handleSessionMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 	entries := s.loadTranscriptEntries(managed)
-	writeJSON(w, http.StatusOK, historyMessages(managed.meta.ID, entries))
+	messages := historyMessages(managed.meta.ID, entries)
+	attachTurnUsage(messages, responseTurns(entries), s.sessionLedger(managed.meta))
+	writeJSON(w, http.StatusOK, messages)
 }
 
 func (s *apiServer) sessionForRequest(r *http.Request, id string) (*managedSession, bool) {
@@ -146,10 +154,13 @@ func (s *apiServer) loadTranscriptEntries(managed *managedSession) []session.Ent
 
 func historyMessages(sessionID string, entries []session.Entry) []historyMessage {
 	result := make([]historyMessage, 0, len(entries))
+	turn := 0
 	for index, entry := range entries {
 		baseID := fmt.Sprintf("%s-%d", sessionID, index)
+		first := len(result)
 		switch message := entry.Message.(type) {
 		case agentcore.UserMessage:
+			turn++
 			if text := agentcore.ContentToText(message.Content); text != "" {
 				result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleUser, Content: text, CreatedAt: entry.Timestamp})
 			}
@@ -170,8 +181,29 @@ func historyMessages(sessionID string, entries []session.Entry) []historyMessage
 		case agentcore.ToolResultMessage:
 			result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleToolResult, Content: agentcore.ContentToText(message.Content), CreatedAt: entry.Timestamp, ToolName: message.ToolName, ToolCallID: message.ToolCallID, IsError: message.IsError})
 		}
+		for i := first; i < len(result); i++ {
+			result[i].turn = turn
+		}
 	}
 	return result
+}
+
+// responseTurns maps each model response in a transcript to its user turn,
+// numbered as historyMessages numbers them.
+func responseTurns(entries []session.Entry) map[string]int {
+	out := map[string]int{}
+	turn := 0
+	for _, entry := range entries {
+		switch message := entry.Message.(type) {
+		case agentcore.UserMessage:
+			turn++
+		case agentcore.AssistantMessage:
+			if message.ResponseID != "" {
+				out[message.ResponseID] = turn
+			}
+		}
+	}
+	return out
 }
 
 func historyArguments(raw json.RawMessage) any {

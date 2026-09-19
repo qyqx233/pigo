@@ -46,6 +46,10 @@ type serverSettings struct {
 	// pointing the server at an arbitrary URL is a deployment decision, not a
 	// per-user preference.
 	CustomProviders []customProvider `json:"customProviders,omitempty"`
+	// ModelPrices is the price table billing applies (billing_price.go). Like
+	// the custom providers it is maintained through its own endpoints, not the
+	// settings form.
+	ModelPrices []modelPrice `json:"modelPrices,omitempty"`
 }
 
 // customProvider is one non-registry endpoint. The API key is not here: it
@@ -144,7 +148,8 @@ func (s *settingsStore) update(next serverSettings) (serverSettings, error) {
 	}
 	merged.AllowRegistration = next.AllowRegistration
 	merged.AllowUserKeys = next.AllowUserKeys
-	// Custom providers have their own endpoints and are not part of this form.
+	// Custom providers and the price table have their own endpoints and are not
+	// part of this form; merged already carries them over unchanged.
 
 	previous := s.settings
 	s.settings = merged

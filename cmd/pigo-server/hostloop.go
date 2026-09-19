@@ -55,6 +55,7 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 	}
 	reg := run.ToolRegistry(tools)
 	managed.runCfg = run.NewConfig(managed.meta.Model, providerName, thinking, prov, creds, reg, run.TodoReminders(tools), nil)
+	s.meterStreams(managed, prov, providerName)
 	msgs := s.loadTranscript(managed)
 	managed.agentCtx = &agentcore.AgentContext{
 		SystemPrompt: prompt,
@@ -111,6 +112,12 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 		RoleField: agentcore.RoleUser,
 		Content:   agentcore.ContentList{agentcore.NewTextContent(prompt)},
 	})
+	// Every model call the turn makes is metered under this turn, and the turn
+	// does not report itself finished until each call's cost is recorded — so
+	// the client sees the last "usage" event before "done".
+	turn := s.newTurn(managed, emit)
+	ctx = withTurn(ctx, turn)
+	defer turn.wait(10 * time.Second)
 	stream := runtime.StartRun(ctx, managed.agentCtx, managed.runCfg)
 	final, err := runtime.DrainStream(ctx, stream, runtime.StreamHandler{
 		OnText: func(delta string) {
@@ -209,9 +216,46 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 	managed.runCfg.Model = managed.meta.Model
 	managed.runCfg.Provider = providerName
 	managed.runCfg.ThinkingLevel = thinking
-	managed.runCfg.Stream = provider.StreamFnFromProvider(prov)
+	s.meterStreams(managed, prov, providerName)
 	managed.runCfg.GetAPIKey = creds.GetAPIKey
 	return nil
+}
+
+// meterStreams points the session's model calls at the provider through the
+// billing meter: the conversation's calls, and the summary calls that compact a
+// long context (which otherwise fall back to the same unmetered stream).
+func (s *apiServer) meterStreams(managed *managedSession, prov provider.Provider, providerName string) {
+	stream := provider.StreamFnFromProvider(prov)
+	managed.runCfg.Stream = s.meter.wrap(stream, providerName, "chat")
+	managed.runCfg.SummaryStream = s.meter.wrap(stream, providerName, "compaction")
+}
+
+// newTurn describes one user turn for the billing meter.
+func (s *apiServer) newTurn(managed *managedSession, emit func(streamEvent)) *turnInfo {
+	userID := managed.meta.UserID
+	username := ""
+	if s.auth != nil && userID != "" {
+		if user, ok := s.auth.findUser(userID); ok {
+			username = user.Username
+		}
+	}
+	return &turnInfo{
+		userID:    userID,
+		username:  username,
+		sessionID: managed.meta.ID,
+		turnID:    newLedgerID(),
+		keySource: s.keySource(userID, managed.meta.Provider),
+		emit:      emit,
+	}
+}
+
+// keySource reports where a call's key comes from, which decides who pays.
+func (s *apiServer) keySource(userID, providerName string) string {
+	envKey := false
+	if spec, ok := provider.LookupProviderSpec(providerName); ok {
+		envKey = envHasKey(spec)
+	}
+	return s.credentialSource(userID, providerName, envKey)
 }
 
 // credentialStoreFor builds the provider credential store for one session,
