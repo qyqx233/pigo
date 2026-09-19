@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +19,6 @@ import (
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/provider"
-	"github.com/smallnest/pigo/internal/session"
 )
 
 // turnHTTP serves the turn endpoints over real HTTP, so connections can be
@@ -369,14 +368,15 @@ func TestStepLimitAndCheckpoints(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("third request never came")
 	}
-	store, _ := session.NewStore(filepath.Join(managed.paths.Root, "transcript"))
-	_, saved, err := store.Load(transcriptID)
+	managed.mu.Lock()
+	saved, err := readTranscript(managed.paths)
+	managed.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var results int
-	for _, m := range saved {
-		if _, ok := m.(agentcore.ToolResultMessage); ok {
+	for _, e := range saved {
+		if _, ok := e.Message.(agentcore.ToolResultMessage); ok {
 			results++
 		}
 	}
@@ -440,4 +440,57 @@ func TestHistoryHidesRunningTurn(t *testing.T) {
 	resp.Body.Close()
 	close(llm.release)
 	stream.until("done", "error")
+}
+
+// TestTurnUsageCommittedAtEnd: a turn's usage stays with the turn while it
+// runs and is committed, with the session, when it ends — including when it is
+// ended by a shutdown.
+func TestTurnUsageCommittedAtEnd(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		name := map[bool]string{false: "turn finishes", true: "shutdown stops it"}[shutdown]
+		t.Run(name, func(t *testing.T) {
+			llm := &scriptLLM{holdAt: 3, held: make(chan struct{}), release: make(chan struct{})}
+			server, id := scriptedSession(t, llm)
+			server.config.turnMaxSteps = 3
+			ledger, err := newLedgerStore(server.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server.ledger = ledger
+			server.meter = &meter{ledger: ledger, settings: server.settings}
+			ts := turnHTTP(t, server)
+			stream := openStream(t, context.Background(), http.MethodPost, ts.URL+"/api/sessions/"+id+"/messages?stream=true", postPrompt("go"))
+			defer stream.close()
+			<-llm.held
+
+			// Two calls are done, and nothing of them is in the database yet.
+			if n, _ := server.db.count("SELECT COUNT(*) FROM ledger WHERE session_id = ?", id); n != 0 {
+				t.Fatalf("ledger rows mid-turn = %d, want 0", n)
+			}
+			if shutdown {
+				go server.stopAllTurns(5 * time.Second)
+				// The held request only ends when released or cancelled.
+			}
+			close(llm.release)
+			stream.until("done", "error")
+
+			// One row per call. A shutdown cancels the held third call before it
+			// answers, and a call that produced nothing is not recorded; the
+			// two that completed must be.
+			calls := int(llm.calls.Load())
+			least := calls
+			if shutdown {
+				least = 2
+			}
+			if n, _ := server.db.count("SELECT COUNT(*) FROM ledger WHERE session_id = ?", id); n < least || n > calls {
+				t.Errorf("ledger rows after the turn = %d, want %d–%d", n, least, calls)
+			}
+			var doc string
+			if err := server.db.query("SELECT meta FROM sessions WHERE id = ?", func(rows *sql.Rows) error {
+				return rows.Scan(&doc)
+			}, id); err != nil || !strings.Contains(doc, `"lastTurn"`) || strings.Contains(doc, `"activeTurn"`) {
+				t.Errorf("session row not updated with the turn: %s %v", doc, err)
+			}
+		})
+	}
 }

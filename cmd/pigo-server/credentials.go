@@ -30,12 +30,10 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -65,11 +63,13 @@ type credentialState struct {
 	Users  map[string]map[string]string `json:"users,omitempty"`
 }
 
-// credentialStore persists provider keys. A store whose cipher is nil is
-// disabled: it answers "nothing configured" and refuses writes.
+// credentialStore keeps provider keys, sealed, in the credentials table (one row
+// per owner and provider) with an in-memory copy for lookups. A store whose
+// cipher is nil is disabled: it answers "nothing configured", refuses writes,
+// and never reads or touches the rows.
 type credentialStore struct {
 	mu     sync.RWMutex
-	path   string
+	db     *sqlDB
 	cipher cipher.AEAD
 	state  credentialState
 }
@@ -78,13 +78,13 @@ type credentialStore struct {
 // raw PIGO_SERVER_SECRET value; empty starts the store disabled, which is not
 // an error. A decode failure is an error: silently continuing would present an
 // existing deployment with an empty store and invite overwriting it.
-func newCredentialStore(dataDir, secret string) (*credentialStore, error) {
+func newCredentialStore(db *sqlDB, secret string) (*credentialStore, error) {
 	store := &credentialStore{
-		path:  filepath.Join(dataDir, "credentials.json"),
+		db:    db,
 		state: credentialState{Public: map[string]string{}, Users: map[string]map[string]string{}},
 	}
 	if strings.TrimSpace(secret) == "" {
-		// Disabled: deliberately do not read the file, so a deployment that
+		// Disabled: deliberately do not read the rows, so a deployment that
 		// starts without its secret cannot go on to overwrite real data.
 		return store, nil
 	}
@@ -93,24 +93,29 @@ func newCredentialStore(dataDir, secret string) (*credentialStore, error) {
 		return nil, err
 	}
 	store.cipher = aead
-
-	data, err := os.ReadFile(store.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return store, nil
+	if err := db.query("SELECT owner, provider, record FROM credentials", func(rows *sql.Rows) error {
+		var owner, providerName, record string
+		if err := rows.Scan(&owner, &providerName, &record); err != nil {
+			return err
 		}
-		return nil, fmt.Errorf("read credential store: %w", err)
-	}
-	if err := json.Unmarshal(data, &store.state); err != nil {
-		return nil, fmt.Errorf("decode credential store: %w", err)
-	}
-	if store.state.Public == nil {
-		store.state.Public = map[string]string{}
-	}
-	if store.state.Users == nil {
-		store.state.Users = map[string]map[string]string{}
+		store.slotLocked(owner, true)[providerName] = record
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
 	}
 	return store, nil
+}
+
+// slotLocked is an owner's map, created when create is set. Caller holds mu
+// (or, at construction, owns the store).
+func (s *credentialStore) slotLocked(owner string, create bool) map[string]string {
+	if owner == "" {
+		return s.state.Public
+	}
+	if s.state.Users[owner] == nil && create {
+		s.state.Users[owner] = map[string]string{}
+	}
+	return s.state.Users[owner]
 }
 
 // newCredentialCipher derives the record key from the master secret.
@@ -199,15 +204,12 @@ func (s *credentialStore) set(owner, providerName, key string) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if owner == "" {
-		s.state.Public[providerName] = sealed
-	} else {
-		if s.state.Users[owner] == nil {
-			s.state.Users[owner] = map[string]string{}
-		}
-		s.state.Users[owner][providerName] = sealed
+	if _, err := s.db.exec(`INSERT INTO credentials (owner, provider, record) VALUES (?, ?, ?)
+ON CONFLICT (owner, provider) DO UPDATE SET record = excluded.record`, owner, providerName, sealed); err != nil {
+		return fmt.Errorf("save credential: %w", err)
 	}
-	return s.saveLocked()
+	s.slotLocked(owner, true)[providerName] = sealed
+	return nil
 }
 
 // deleteUserKey removes one user's key, reporting whether anything was removed.
@@ -235,11 +237,14 @@ func (s *credentialStore) delete(owner, providerName string) (bool, error) {
 	if _, ok := slot[providerName]; !ok {
 		return false, nil
 	}
+	if _, err := s.db.exec("DELETE FROM credentials WHERE owner = ? AND provider = ?", owner, providerName); err != nil {
+		return false, err
+	}
 	delete(slot, providerName)
 	if owner != "" && len(slot) == 0 {
 		delete(s.state.Users, owner)
 	}
-	return true, s.saveLocked()
+	return true, nil
 }
 
 // dropUser removes every key belonging to a user, for account deletion.
@@ -249,11 +254,14 @@ func (s *credentialStore) dropUser(userID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.state.Users[userID]; !ok {
+	if _, ok := s.state.Users[userID]; !ok || userID == "" {
 		return nil
 	}
+	if _, err := s.db.exec("DELETE FROM credentials WHERE owner = ?", userID); err != nil {
+		return err
+	}
 	delete(s.state.Users, userID)
-	return s.saveLocked()
+	return nil
 }
 
 // resolve returns the key to use for (user, provider), applying the precedence
@@ -351,23 +359,4 @@ func maskAPIKey(key string) string {
 		return "••••"
 	}
 	return "••••" + string(runes[len(runes)-4:])
-}
-
-// saveLocked writes the store through a temporary file so a crash cannot leave
-// a half-written document behind. The caller holds mu.
-func (s *credentialStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.state, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write credential store: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit credential store: %w", err)
-	}
-	return nil
 }

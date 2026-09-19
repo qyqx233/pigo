@@ -28,12 +28,14 @@ func TestRegisterLoginLogout(t *testing.T) {
 	if len(cookies) != 1 || cookies[0].Name != authCookieName || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Fatalf("auth cookie = %#v", cookies)
 	}
-	data, err := os.ReadFile(filepath.Join(server.config.dataDir, "auth", "auth.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(data, []byte("correct-horse")) {
-		t.Fatal("auth store contains plaintext password")
+	for _, file := range []string{server.db.target.path, server.db.target.path + "-wal"} {
+		data, err := os.ReadFile(file)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte("correct-horse")) {
+			t.Fatalf("%s contains the plaintext password", filepath.Base(file))
+		}
 	}
 
 	wrongRequest := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"wrong-pass"}`))
@@ -136,9 +138,9 @@ func TestSessionOwnershipAndHistory(t *testing.T) {
 		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("继续这个历史问题")}},
 		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("这是历史回答")}},
 	}}
-	header, msgs := transcriptHeader(managed.meta), managed.agentCtx.Messages
+	msgs := managed.agentCtx.Messages
 	managed.mu.Unlock()
-	server.checkpoint(managed, header, msgs, 0)
+	server.checkpoint(managed, msgs)
 
 	otherRequest := requestWithPrincipal(httptest.NewRequest(http.MethodGet, "/api/sessions/"+created.ID, nil), requestPrincipal{UserID: "user-b"})
 	otherRequest.SetPathValue("id", created.ID)

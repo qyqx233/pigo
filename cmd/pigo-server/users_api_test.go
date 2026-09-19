@@ -1,10 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -95,12 +95,17 @@ func TestResetPassword(t *testing.T) {
 	}
 
 	// The plaintext is not recoverable from the store.
-	raw, err := os.ReadFile(server.auth.path)
-	if err != nil {
+	var hashes strings.Builder
+	if err := server.db.query("SELECT password_hash FROM users", func(rows *sql.Rows) error {
+		var h string
+		err := rows.Scan(&h)
+		hashes.WriteString(h)
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), temporary) {
-		t.Fatal("auth.json contains the temporary password in plaintext")
+	if strings.Contains(hashes.String(), temporary) {
+		t.Fatal("the users table holds the temporary password in plaintext")
 	}
 }
 

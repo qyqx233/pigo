@@ -177,19 +177,32 @@ func TestCloseKeepsSessionDir(t *testing.T) {
 	}
 }
 
-func TestLoadSessionsFromDisk(t *testing.T) {
-	data := t.TempDir()
-	id := "abc123"
-	paths := newSessionPaths(data, id)
-	if err := paths.create(); err != nil {
-		t.Fatal(err)
-	}
-	meta := sessionMeta{ID: id, Model: "m", Provider: "p", Thinking: "low", LastUsed: time.Now().UTC()}
-	if err := paths.saveMeta(meta); err != nil {
-		t.Fatal(err)
-	}
-	got := loadSessions(data)
-	if got[id] == nil || got[id].meta.Model != "m" {
-		t.Fatalf("loadSessions = %+v", got)
-	}
+func TestLoadSessions(t *testing.T) {
+	forEachDB(t, func(t *testing.T, target dbTarget) {
+		data := t.TempDir()
+		db := mustOpen(t, target)
+		meta := sessionMeta{ID: "abc123", UserID: "u1", Model: "m", Provider: "p", Thinking: "low", LastUsed: time.Now().UTC()}
+		// A turn left running by a process that died.
+		crashed := sessionMeta{ID: "def456", Model: "m", ActiveTurn: &turnRecord{ID: "t1", Status: "running", Steps: 3}}
+		for _, m := range []sessionMeta{meta, crashed} {
+			if err := upsertSession(db, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db.Close()
+
+		got, err := loadSessions(mustOpen(t, target), data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got["abc123"] == nil || got["abc123"].meta.Model != "m" || got["abc123"].meta.UserID != "u1" {
+			t.Fatalf("loadSessions = %+v", got)
+		}
+		if _, err := os.Stat(got["abc123"].paths.Run); err != nil {
+			t.Errorf("run dir not prepared: %v", err)
+		}
+		if c := got["def456"].meta; c.ActiveTurn != nil || c.LastTurn == nil || c.LastTurn.Reason != turnInterrupted {
+			t.Errorf("interrupted turn not recovered: %+v / %+v", c.ActiveTurn, c.LastTurn)
+		}
+	})
 }

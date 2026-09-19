@@ -5,13 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -27,9 +25,13 @@ const (
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{3,32}$`)
 
+// authStore keeps accounts and login tokens in memory for every request's
+// authentication, backed by the users and auth_sessions tables. Each change is
+// written to the database first and applied in memory only once that
+// succeeded.
 type authStore struct {
 	mu    sync.Mutex
-	path  string
+	db    *sqlDB
 	state authState
 }
 
@@ -84,27 +86,57 @@ type requestPrincipal struct {
 
 type principalContextKey struct{}
 
-func newAuthStore(dataDir string) (*authStore, error) {
-	dir := filepath.Join(dataDir, "auth")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create auth dir: %w", err)
+func newAuthStore(db *sqlDB) (*authStore, error) {
+	store := &authStore{db: db}
+	if err := db.query("SELECT id, username, username_key, password_hash, created_at, disabled_at FROM users ORDER BY created_at, id",
+		func(rows *sql.Rows) error {
+			var (
+				u        userRecord
+				created  int64
+				disabled sql.NullInt64
+			)
+			if err := rows.Scan(&u.ID, &u.Username, &u.UsernameKey, &u.PasswordHash, &created, &disabled); err != nil {
+				return err
+			}
+			u.CreatedAt = fromNanos(created)
+			u.DisabledAt = fromNullNanos(disabled)
+			store.state.Users = append(store.state.Users, u)
+			return nil
+		}); err != nil {
+		return nil, fmt.Errorf("load users: %w", err)
 	}
-	store := &authStore{path: filepath.Join(dir, "auth.json")}
-	data, err := os.ReadFile(store.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return store, nil
-		}
-		return nil, fmt.Errorf("read auth store: %w", err)
+	now := time.Now().UTC()
+	if _, err := db.exec("DELETE FROM auth_sessions WHERE expires_at <= ?", toNanos(now)); err != nil {
+		return nil, fmt.Errorf("prune login tokens: %w", err)
 	}
-	if err := json.Unmarshal(data, &store.state); err != nil {
-		return nil, fmt.Errorf("decode auth store: %w", err)
-	}
-	store.pruneExpiredLocked(time.Now().UTC())
-	if err := store.saveLocked(); err != nil {
-		return nil, err
+	if err := db.query("SELECT token_hash, user_id, created_at, expires_at FROM auth_sessions",
+		func(rows *sql.Rows) error {
+			var (
+				a                authSession
+				created, expires int64
+			)
+			if err := rows.Scan(&a.TokenHash, &a.UserID, &created, &expires); err != nil {
+				return err
+			}
+			a.CreatedAt, a.ExpiresAt = fromNanos(created), fromNanos(expires)
+			store.state.Sessions = append(store.state.Sessions, a)
+			return nil
+		}); err != nil {
+		return nil, fmt.Errorf("load login tokens: %w", err)
 	}
 	return store, nil
+}
+
+func insertUser(e sqlExec, u userRecord) error {
+	_, err := e.exec("INSERT INTO users (id, username, username_key, password_hash, created_at, disabled_at) VALUES (?, ?, ?, ?, ?, ?)",
+		u.ID, u.Username, u.UsernameKey, u.PasswordHash, toNanos(u.CreatedAt), nullNanos(u.DisabledAt))
+	return err
+}
+
+func insertAuthSession(e sqlExec, a authSession) error {
+	_, err := e.exec("INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+		a.TokenHash, a.UserID, toNanos(a.CreatedAt), toNanos(a.ExpiresAt))
+	return err
 }
 
 func (s *authStore) register(username, password string) (publicUser, string, bool, error) {
@@ -139,18 +171,17 @@ func (s *authStore) register(username, password string) (publicUser, string, boo
 		}
 	}
 	user := userRecord{ID: id, Username: username, UsernameKey: key, PasswordHash: string(hash), CreatedAt: now}
-	s.state.Users = append(s.state.Users, user)
-	s.state.Sessions = append(s.state.Sessions, authSession{
-		TokenHash: tokenHash,
-		UserID:    id,
-		CreatedAt: now,
-		ExpiresAt: now.Add(authLifetime),
-	})
-	if err := s.saveLocked(); err != nil {
-		s.state.Users = s.state.Users[:len(s.state.Users)-1]
-		s.state.Sessions = s.state.Sessions[:len(s.state.Sessions)-1]
-		return publicUser{}, "", false, err
+	login := authSession{TokenHash: tokenHash, UserID: id, CreatedAt: now, ExpiresAt: now.Add(authLifetime)}
+	if err := s.db.inTx(func(tx *sqlTx) error {
+		if err := insertUser(tx, user); err != nil {
+			return err
+		}
+		return insertAuthSession(tx, login)
+	}); err != nil {
+		return publicUser{}, "", false, fmt.Errorf("save account: %w", err)
 	}
+	s.state.Users = append(s.state.Users, user)
+	s.state.Sessions = append(s.state.Sessions, login)
 	return user.public(), rawToken, firstUser, nil
 }
 
@@ -178,23 +209,19 @@ func (s *authStore) login(username, password string) (publicUser, string, error)
 		return publicUser{}, "", err
 	}
 	now := time.Now().UTC()
+	login := authSession{TokenHash: tokenHash, UserID: user.ID, CreatedAt: now, ExpiresAt: now.Add(authLifetime)}
 	s.mu.Lock()
-	previous := append([]authSession(nil), s.state.Sessions...)
+	defer s.mu.Unlock()
+	if err := s.db.inTx(func(tx *sqlTx) error {
+		if _, err := tx.exec("DELETE FROM auth_sessions WHERE expires_at <= ?", toNanos(now)); err != nil {
+			return err
+		}
+		return insertAuthSession(tx, login)
+	}); err != nil {
+		return publicUser{}, "", fmt.Errorf("save login: %w", err)
+	}
 	s.pruneExpiredLocked(now)
-	s.state.Sessions = append(s.state.Sessions, authSession{
-		TokenHash: tokenHash,
-		UserID:    user.ID,
-		CreatedAt: now,
-		ExpiresAt: now.Add(authLifetime),
-	})
-	err = s.saveLocked()
-	if err != nil {
-		s.state.Sessions = previous
-	}
-	s.mu.Unlock()
-	if err != nil {
-		return publicUser{}, "", err
-	}
+	s.state.Sessions = append(s.state.Sessions, login)
 	return user.public(), rawToken, nil
 }
 
@@ -227,6 +254,9 @@ func (s *authStore) logout(rawToken string) error {
 	tokenHash := hashAuthToken(rawToken)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, err := s.db.exec("DELETE FROM auth_sessions WHERE token_hash = ?", tokenHash); err != nil {
+		return err
+	}
 	kept := s.state.Sessions[:0]
 	for _, login := range s.state.Sessions {
 		if subtle.ConstantTimeCompare([]byte(login.TokenHash), []byte(tokenHash)) != 1 {
@@ -234,7 +264,7 @@ func (s *authStore) logout(rawToken string) error {
 		}
 	}
 	s.state.Sessions = kept
-	return s.saveLocked()
+	return nil
 }
 
 func (s *authStore) pruneExpiredLocked(now time.Time) {
@@ -245,23 +275,6 @@ func (s *authStore) pruneExpiredLocked(now time.Time) {
 		}
 	}
 	s.state.Sessions = kept
-}
-
-func (s *authStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.state, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write auth store: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit auth store: %w", err)
-	}
-	return nil
 }
 
 func (u userRecord) public() publicUser {
@@ -460,8 +473,8 @@ func (s *authStore) findUser(id string) (publicUser, bool) {
 	return publicUser{}, false
 }
 
-// revokeSessionsLocked drops every active session belonging to a user. The
-// caller holds mu and is responsible for saving.
+// revokeSessionsLocked drops a user's login tokens from memory. The caller
+// holds mu and has already deleted them from the database.
 func (s *authStore) revokeSessionsLocked(userID string) {
 	kept := s.state.Sessions[:0]
 	for _, login := range s.state.Sessions {
@@ -483,18 +496,27 @@ func (s *authStore) setDisabled(userID string, disabled bool) (publicUser, error
 		if user.ID != userID {
 			continue
 		}
-		previous := user.DisabledAt
-		if disabled {
-			if user.DisabledAt == nil {
-				s.state.Users[i].DisabledAt = &now
-			}
-			s.revokeSessionsLocked(userID)
-		} else {
-			s.state.Users[i].DisabledAt = nil
+		next := user.DisabledAt
+		if disabled && next == nil {
+			next = &now
+		} else if !disabled {
+			next = nil
 		}
-		if err := s.saveLocked(); err != nil {
-			s.state.Users[i].DisabledAt = previous
+		if err := s.db.inTx(func(tx *sqlTx) error {
+			if _, err := tx.exec("UPDATE users SET disabled_at = ? WHERE id = ?", nullNanos(next), userID); err != nil {
+				return err
+			}
+			if disabled {
+				_, err := tx.exec("DELETE FROM auth_sessions WHERE user_id = ?", userID)
+				return err
+			}
+			return nil
+		}); err != nil {
 			return publicUser{}, err
+		}
+		s.state.Users[i].DisabledAt = next
+		if disabled {
+			s.revokeSessionsLocked(userID)
 		}
 		return s.state.Users[i].public(), nil
 	}
@@ -520,13 +542,17 @@ func (s *authStore) resetPassword(userID string) (string, error) {
 		if user.ID != userID {
 			continue
 		}
-		previous := user.PasswordHash
-		s.state.Users[i].PasswordHash = string(hash)
-		s.revokeSessionsLocked(userID)
-		if err := s.saveLocked(); err != nil {
-			s.state.Users[i].PasswordHash = previous
+		if err := s.db.inTx(func(tx *sqlTx) error {
+			if _, err := tx.exec("UPDATE users SET password_hash = ? WHERE id = ?", string(hash), userID); err != nil {
+				return err
+			}
+			_, err := tx.exec("DELETE FROM auth_sessions WHERE user_id = ?", userID)
+			return err
+		}); err != nil {
 			return "", err
 		}
+		s.state.Users[i].PasswordHash = string(hash)
+		s.revokeSessionsLocked(userID)
 		return password, nil
 	}
 	return "", errors.New("用户不存在")
@@ -541,9 +567,18 @@ func (s *authStore) deleteUser(userID string) error {
 		if user.ID != userID {
 			continue
 		}
+		if err := s.db.inTx(func(tx *sqlTx) error {
+			if _, err := tx.exec("DELETE FROM users WHERE id = ?", userID); err != nil {
+				return err
+			}
+			_, err := tx.exec("DELETE FROM auth_sessions WHERE user_id = ?", userID)
+			return err
+		}); err != nil {
+			return err
+		}
 		s.state.Users = append(s.state.Users[:i], s.state.Users[i+1:]...)
 		s.revokeSessionsLocked(userID)
-		return s.saveLocked()
+		return nil
 	}
 	return errors.New("用户不存在")
 }

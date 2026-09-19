@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +13,6 @@ type sessionPaths struct {
 	Home      string
 	PigoHome  string
 	Run       string
-	MetaFile  string
 }
 
 func newSessionPaths(dataDir, id string) sessionPaths {
@@ -26,7 +24,6 @@ func newSessionPaths(dataDir, id string) sessionPaths {
 		Home:      home,
 		PigoHome:  filepath.Join(home, ".pigo"),
 		Run:       filepath.Join(root, "run"),
-		MetaFile:  filepath.Join(root, "meta.json"),
 	}
 }
 
@@ -55,60 +52,6 @@ func (p sessionPaths) create() error {
 		}
 	}
 	return nil
-}
-
-func loadSessions(dataDir string) map[string]*managedSession {
-	out := make(map[string]*managedSession)
-	root := filepath.Join(dataDir, "sessions")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return out
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		paths := newSessionPaths(dataDir, e.Name())
-		meta, err := paths.loadMeta()
-		if err != nil || meta.ID == "" {
-			continue
-		}
-		_ = os.MkdirAll(paths.Run, 0o700)
-		if recoverInterruptedTurn(&meta) {
-			_ = paths.saveMeta(meta)
-		}
-		out[meta.ID] = &managedSession{paths: paths, meta: meta}
-	}
-	return out
-}
-
-func (p sessionPaths) saveMeta(meta sessionMeta) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := p.MetaFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p.MetaFile)
-}
-
-func (p sessionPaths) loadMeta() (sessionMeta, error) {
-	data, err := os.ReadFile(p.MetaFile)
-	if err != nil {
-		return sessionMeta{}, err
-	}
-	var meta sessionMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return sessionMeta{}, err
-	}
-	return meta, nil
-}
-
-func (p sessionPaths) remove() error {
-	return os.RemoveAll(p.Root)
 }
 
 func defaultDataDir() string {

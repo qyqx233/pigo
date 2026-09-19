@@ -206,10 +206,10 @@ func (s *apiServer) closeUserSessions(userID string, removeData bool) (int, []st
 			managed.closed = true
 		}
 		managed.stopLive()
-		paths := managed.paths
+		paths, id := managed.paths, managed.meta.ID
 		managed.mu.Unlock()
 		if removeData {
-			if err := paths.remove(); err != nil {
+			if err := s.removeSession(id, paths); err != nil {
 				problems = append(problems, "删除工作区 "+paths.Root+": "+err.Error())
 			}
 		}

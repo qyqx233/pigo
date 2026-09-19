@@ -53,7 +53,7 @@ func (s *apiServer) startTurn(managed *managedSession, prompt, prefix string) (*
 	managed.turn = run
 	managed.meta.ActiveTurn = &turnRecord{ID: run.id, StartedAt: run.startedAt.UTC(), Status: "running"}
 	managed.meta.LastUsed = time.Now().UTC()
-	_ = managed.paths.saveMeta(managed.meta)
+	_ = s.saveSession(managed.meta)
 	snapshot, sub, _ := run.subscribe()
 
 	go run.watch()
@@ -70,6 +70,7 @@ func (s *apiServer) startTurn(managed *managedSession, prompt, prefix string) (*
 // finishTurn records the turn's end in the session and tells its clients.
 func (s *apiServer) finishTurn(managed *managedSession, run *turnRun, reply string, runErr error) {
 	final, record := run.outcome(reply, runErr)
+	usage := run.takeLedger()
 	managed.mu.Lock()
 	if managed.meta.ActiveTurn != nil && managed.meta.ActiveTurn.ID == run.id {
 		managed.meta.ActiveTurn = nil
@@ -77,10 +78,28 @@ func (s *apiServer) finishTurn(managed *managedSession, run *turnRun, reply stri
 	rec := record
 	managed.meta.LastTurn = &rec
 	managed.meta.LastUsed = time.Now().UTC()
-	if !managed.closed {
-		_ = managed.paths.saveMeta(managed.meta)
-	}
+	meta, closed := managed.meta, managed.closed
 	managed.mu.Unlock()
+	// One commit for the turn: its usage, and the session's metadata. A
+	// deleted session's usage is still recorded; the ledger outlives it.
+	if s.db != nil && (len(usage) > 0 || !closed) {
+		if err := s.db.inTx(func(tx *sqlTx) error {
+			if !closed {
+				if err := upsertSession(tx, meta); err != nil {
+					return err
+				}
+			}
+			for _, e := range usage {
+				if err := insertLedgerEntry(tx, e); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			log.Printf("pigo-server: session %s: turn %s: saving %d usage records and the session failed: %v",
+				shortID(run.sessionID), shortID(run.id), len(usage), err)
+		}
+	}
 	run.finish(final, record)
 
 	if record.Reason != turnDone {

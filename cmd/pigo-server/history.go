@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -48,7 +47,7 @@ func (s *apiServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			if managed.meta.Title == "" {
 				managed.meta.Title = s.deriveSessionTitle(managed)
 				if managed.meta.Title != "" {
-					_ = managed.paths.saveMeta(managed.meta)
+					_ = s.saveSession(managed.meta)
 				}
 			}
 			result = append(result, sessionResponse(managed))
@@ -121,7 +120,7 @@ func (s *apiServer) claimLegacySessions(userID string) {
 			if managed.meta.Title == "" {
 				managed.meta.Title = s.deriveSessionTitle(managed)
 			}
-			_ = managed.paths.saveMeta(managed.meta)
+			_ = s.saveSession(managed.meta)
 		}
 		managed.mu.Unlock()
 	}
@@ -146,18 +145,6 @@ func cleanSessionTitle(value string) string {
 	}
 	runes := []rune(value)
 	return string(runes[:maxRunes]) + "…"
-}
-
-func (s *apiServer) loadTranscriptEntries(managed *managedSession) []session.Entry {
-	store, err := session.NewStore(filepath.Join(managed.paths.Root, "transcript"))
-	if err != nil {
-		return nil
-	}
-	_, entries, err := store.LoadEntries(transcriptID)
-	if err != nil {
-		return nil
-	}
-	return entries
 }
 
 func historyMessages(sessionID string, entries []session.Entry) []historyMessage {
@@ -225,11 +212,6 @@ func historyArguments(raw json.RawMessage) any {
 	return string(raw)
 }
 
-func sessionHasNoTranscript(paths sessionPaths) bool {
-	entries, err := os.ReadDir(filepath.Join(paths.Root, "transcript"))
-	return os.IsNotExist(err) || (err == nil && len(entries) == 0)
-}
-
 func workspaceIsEmpty(paths sessionPaths) bool {
 	entries, err := os.ReadDir(paths.Workspace)
 	return err == nil && len(entries) == 0
@@ -242,7 +224,7 @@ func (s *apiServer) removeExpiredEmptySession(id string, managed *managedSession
 		s.mu.Unlock()
 		return
 	}
-	if managed.closed || managed.activeTurn() != nil || managed.liveAlive() || now.Sub(managed.meta.LastUsed) < s.config.emptySessionTTL || !sessionHasNoTranscript(managed.paths) || !workspaceIsEmpty(managed.paths) {
+	if managed.closed || managed.activeTurn() != nil || managed.liveAlive() || now.Sub(managed.meta.LastUsed) < s.config.emptySessionTTL || hasTranscript(managed.paths) || !workspaceIsEmpty(managed.paths) {
 		managed.mu.Unlock()
 		s.mu.Unlock()
 		return
@@ -252,7 +234,7 @@ func (s *apiServer) removeExpiredEmptySession(id string, managed *managedSession
 	paths := managed.paths
 	managed.mu.Unlock()
 	s.mu.Unlock()
-	if err := paths.remove(); err != nil {
+	if err := s.removeSession(id, paths); err != nil {
 		// Cleanup is best effort. The directory will be discovered again only on
 		// restart, where it remains eligible for the next cleanup pass.
 		return

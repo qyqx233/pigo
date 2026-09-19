@@ -1,12 +1,11 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -52,42 +51,39 @@ func (m customModel) expired(now time.Time) bool {
 	return now.UTC().Format("2006-01-02") > m.ExpiresAt
 }
 
+// customModelStore keeps custom model entries in the custom_models table, with
+// an in-memory list (in insertion order) for lookups.
 type customModelStore struct {
 	mu     sync.Mutex
-	path   string
+	db     *sqlDB
 	models []customModel
 }
 
-func newCustomModelStore(dataDir string) (*customModelStore, error) {
-	dir := filepath.Join(dataDir, "models")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create models dir: %w", err)
-	}
-	store := &customModelStore{path: filepath.Join(dir, "models.json")}
-	data, err := os.ReadFile(store.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return store, nil
-		}
-		return nil, fmt.Errorf("read custom models store: %w", err)
-	}
-	if err := json.Unmarshal(data, &store.models); err != nil {
-		return nil, fmt.Errorf("decode custom models store: %w", err)
-	}
-	// Entries written before scopes existed were all user-scoped.
-	migrated := false
-	for i := range store.models {
-		if store.models[i].Scope == "" {
-			store.models[i].Scope = modelScopeUser
-			migrated = true
-		}
-	}
-	if migrated {
-		if err := store.saveLocked(); err != nil {
-			return nil, err
-		}
+func newCustomModelStore(db *sqlDB) (*customModelStore, error) {
+	store := &customModelStore{db: db}
+	if err := db.query("SELECT scope, user_id, id, label, provider, expires_at, created_at FROM custom_models ORDER BY created_at, id",
+		func(rows *sql.Rows) error {
+			var (
+				m       customModel
+				created int64
+			)
+			if err := rows.Scan(&m.Scope, &m.UserID, &m.ID, &m.Label, &m.Provider, &m.ExpiresAt, &created); err != nil {
+				return err
+			}
+			m.CreatedAt = fromNanos(created)
+			store.models = append(store.models, m)
+			return nil
+		}); err != nil {
+		return nil, fmt.Errorf("load custom models: %w", err)
 	}
 	return store, nil
+}
+
+func upsertCustomModel(e sqlExec, m customModel) error {
+	_, err := e.exec(`INSERT INTO custom_models (scope, user_id, id, label, provider, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (scope, user_id, id) DO UPDATE SET label = excluded.label, provider = excluded.provider, expires_at = excluded.expires_at`,
+		m.Scope, m.UserID, m.ID, m.Label, m.Provider, m.ExpiresAt, toNanos(m.CreatedAt))
+	return err
 }
 
 // list returns one user's own entries.
@@ -143,17 +139,20 @@ func (s *customModelStore) add(m customModel) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := upsertCustomModel(s.db, m); err != nil {
+		return fmt.Errorf("save custom model: %w", err)
+	}
 	for i, existing := range s.models {
 		if existing.Scope == m.Scope && existing.UserID == m.UserID && existing.ID == m.ID {
 			existing.Label = m.Label
 			existing.Provider = m.Provider
 			existing.ExpiresAt = m.ExpiresAt
 			s.models[i] = existing
-			return s.saveLocked()
+			return nil
 		}
 	}
 	s.models = append(s.models, m)
-	return s.saveLocked()
+	return nil
 }
 
 // remove deletes one user's entry.
@@ -171,8 +170,10 @@ func (s *customModelStore) removeScoped(scope, userID, id string) bool {
 	defer s.mu.Unlock()
 	for i, m := range s.models {
 		if m.Scope == scope && m.UserID == userID && m.ID == id {
+			if _, err := s.db.exec("DELETE FROM custom_models WHERE scope = ? AND user_id = ? AND id = ?", scope, userID, id); err != nil {
+				return false
+			}
 			s.models = append(s.models[:i], s.models[i+1:]...)
-			_ = s.saveLocked()
 			return true
 		}
 	}
@@ -184,20 +185,18 @@ func (s *customModelStore) removeScoped(scope, userID, id string) bool {
 func (s *customModelStore) dropUser(userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, err := s.db.exec("DELETE FROM custom_models WHERE scope = ? AND user_id = ?", modelScopeUser, userID); err != nil {
+		return err
+	}
 	kept := s.models[:0]
-	removed := false
 	for _, m := range s.models {
 		if !m.public() && m.UserID == userID {
-			removed = true
 			continue
 		}
 		kept = append(kept, m)
 	}
 	s.models = kept
-	if !removed {
-		return nil
-	}
-	return s.saveLocked()
+	return nil
 }
 
 // find locates the entry that governs modelID for this user: their own first,
@@ -221,23 +220,6 @@ func (s *customModelStore) find(userID, modelID string) (customModel, bool) {
 		}
 	}
 	return customModel{}, false
-}
-
-func (s *customModelStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.models, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write custom models store: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit custom models store: %w", err)
-	}
-	return nil
 }
 
 // expiredCustomModel reports whether modelID names one of the caller's custom

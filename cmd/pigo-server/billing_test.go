@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -78,7 +76,13 @@ func TestPriceValidate(t *testing.T) {
 // TestPriceForPrefersResponseModel: an alias answer is priced as the model that
 // answered, and the requested model is the fallback.
 func TestPriceForPrefersResponseModel(t *testing.T) {
-	store, err := newSettingsStore(serverConfig{dataDir: t.TempDir(), model: "m", thinking: "medium"})
+	forEachDB(t, testPriceFor)
+}
+
+func testPriceFor(t *testing.T, target dbTarget) {
+	db := mustOpen(t, target)
+	cfg := serverConfig{model: "m", thinking: "medium"}
+	store, err := newSettingsStore(db, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +114,8 @@ func TestPriceForPrefersResponseModel(t *testing.T) {
 		t.Errorf("remove = %v %v", removed, err)
 	}
 	// Prices survive a restart.
-	reloaded, err := newSettingsStore(serverConfig{dataDir: filepath.Dir(store.path), model: "m", thinking: "medium"})
+	db.Close()
+	reloaded, err := newSettingsStore(mustOpen(t, target), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +125,11 @@ func TestPriceForPrefersResponseModel(t *testing.T) {
 }
 
 func TestLedgerAppendAndScan(t *testing.T) {
-	ledger, err := newLedgerStore(t.TempDir())
+	forEachDB(t, testLedger)
+}
+
+func testLedger(t *testing.T, target dbTarget) {
+	ledger, err := newLedgerStore(mustOpen(t, target))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,11 +144,6 @@ func TestLedgerAppendAndScan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A corrupted line is skipped, not fatal.
-	f, _ := os.OpenFile(ledger.monthPath(sep), os.O_APPEND|os.O_WRONLY, 0o600)
-	_, _ = f.WriteString("{not json\n")
-	_ = f.Close()
-
 	ids := func(q ledgerQuery) string {
 		entries, err := ledger.scan(q)
 		if err != nil {
@@ -208,12 +212,12 @@ type meterFixture struct {
 
 func newMeterFixture(t *testing.T) *meterFixture {
 	t.Helper()
-	dir := t.TempDir()
-	ledger, err := newLedgerStore(dir)
+	db := openTestDB(t)
+	ledger, err := newLedgerStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings, err := newSettingsStore(serverConfig{dataDir: dir, model: "m", thinking: "medium"})
+	settings, err := newSettingsStore(db, serverConfig{model: "m", thinking: "medium"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +498,7 @@ func TestBillingEndToEnd(t *testing.T) {
 
 	server := newTestServer(t)
 	server.loopFn = nil
-	ledger, err := newLedgerStore(server.config.dataDir)
+	ledger, err := newLedgerStore(server.db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +692,7 @@ func TestPriceAPI(t *testing.T) {
 
 func TestUsageReports(t *testing.T) {
 	server := newTestServer(t)
-	ledger, err := newLedgerStore(server.config.dataDir)
+	ledger, err := newLedgerStore(server.db)
 	if err != nil {
 		t.Fatal(err)
 	}

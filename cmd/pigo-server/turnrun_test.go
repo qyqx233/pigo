@@ -84,7 +84,7 @@ func TestTurnOutcome(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newTurnRun("s", limits)
-			run.observe(agentcore.TurnEndEvent{ToolResults: []agentcore.ToolResultMessage{{}}})
+			run.steps = 1
 			run.stepLimited = tc.stepLimit
 			if tc.cause != nil {
 				run.stop(tc.cause)
@@ -168,20 +168,30 @@ func TestTurnDropsSlowSubscriber(t *testing.T) {
 	}
 }
 
-// TestTurnStepLimitHooks walks the hooks through the loop's order (steering,
-// then the stop check, after every step): the wrap-up note goes in once, the
-// model gets one more step, then the turn stops.
+// TestTurnStepLimitHooks walks the hooks in the loop's order after every step
+// (prepare the next turn, then the stop check), with the message list growing
+// as the loop grows it: the wrap-up note goes in once at the limit, the model
+// gets one more step, then the turn stops. Steps are counted from the tool
+// results in the list, so a rejected call counts too.
 func TestTurnStepLimitHooks(t *testing.T) {
 	run := newTurnRun("s", turnLimits{maxSteps: 2})
 	var cfg runtime.RunConfig
+	agentCtx := &agentcore.AgentContext{Messages: agentcore.MessageList{
+		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("go")}},
+	}}
 	checkpoints := 0
-	run.installHooks(&cfg, func(*agentcore.AgentContext) { checkpoints++ })
+	run.installHooks(&cfg, len(agentCtx.Messages), func(*agentcore.AgentContext) { checkpoints++ })
 	ctx := context.Background()
 	step := func(tools int) (note bool, stop bool) {
-		results := make([]agentcore.ToolResultMessage, tools)
-		run.observe(agentcore.TurnEndEvent{ToolResults: results})
-		steer := cfg.GetSteeringMessages(ctx)
-		return len(steer) > 0, cfg.ShouldStopAfterTurn(ctx, &agentcore.AgentContext{})
+		agentCtx.Messages = append(agentCtx.Messages, agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant})
+		for i := 0; i < tools; i++ {
+			agentCtx.Messages = append(agentCtx.Messages, agentcore.ToolResultMessage{RoleField: agentcore.RoleToolResult, IsError: i%2 == 1})
+		}
+		if update := cfg.PrepareNextTurn(ctx, agentCtx); update != nil && update.Messages != nil {
+			agentCtx.Messages = *update.Messages
+			note = true
+		}
+		return note, cfg.ShouldStopAfterTurn(ctx, agentCtx)
 	}
 	if note, stop := step(1); note || stop {
 		t.Fatal("step 1 of 2")
@@ -190,11 +200,15 @@ func TestTurnStepLimitHooks(t *testing.T) {
 	if !note || stop {
 		t.Fatalf("at the limit: note %v stop %v; want the note and one more step", note, stop)
 	}
-	if note, stop := step(1); note || !stop {
+	if last, ok := agentCtx.Messages[len(agentCtx.Messages)-1].(agentcore.UserMessage); !ok ||
+		!strings.Contains(agentcore.ContentToText(last.Content), "2 次上限") {
+		t.Fatalf("the note is not the last message: %+v", agentCtx.Messages[len(agentCtx.Messages)-1])
+	}
+	if note, stop := step(2); note || !stop {
 		t.Fatalf("wrap-up step: note %v stop %v; want a stop without a second note", note, stop)
 	}
-	if !run.stepLimited || checkpoints != 3 {
-		t.Errorf("stepLimited %v, checkpoints %d", run.stepLimited, checkpoints)
+	if !run.stepLimited || checkpoints != 3 || run.stepCount() != 4 {
+		t.Errorf("stepLimited %v, checkpoints %d, steps %d", run.stepLimited, checkpoints, run.stepCount())
 	}
 }
 
@@ -204,7 +218,7 @@ func TestRecoverInterruptedTurn(t *testing.T) {
 		t.Fatal("not recovered")
 	}
 	if meta.ActiveTurn != nil || meta.LastTurn == nil || meta.LastTurn.Reason != turnInterrupted ||
-		meta.LastTurn.Steps != 17 || !strings.Contains(meta.LastTurn.Message, "17 步") {
+		!strings.Contains(meta.LastTurn.Message, "保存在对话里") {
 		t.Errorf("meta = %+v / %+v", meta.ActiveTurn, meta.LastTurn)
 	}
 	if recoverInterruptedTurn(&meta) {

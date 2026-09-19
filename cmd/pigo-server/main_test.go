@@ -120,6 +120,7 @@ func TestHandleMessageSandboxUnavailable(t *testing.T) {
 			maxSessions: 8,
 		},
 		sandbox:  Sandbox{Bwrap: filepath.Join(t.TempDir(), "missing"), Pigo: filepath.Join(t.TempDir(), "missing")},
+		db:       openTestDB(t),
 		sessions: map[string]*managedSession{},
 	}
 	id := createSession(t, server)
@@ -365,7 +366,8 @@ func builtinResolver(model, providerName string) (provider.Provider, string, err
 func newTestServer(t *testing.T) *apiServer {
 	t.Helper()
 	data := t.TempDir()
-	auth, err := newAuthStore(data)
+	db := openTestDB(t)
+	auth, err := newAuthStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,15 +380,15 @@ func newTestServer(t *testing.T) *apiServer {
 	}
 	// The credential store is enabled in tests so handlers exercise the real
 	// encrypt/decrypt path rather than the disabled fallback.
-	credentials, err := newCredentialStore(data, "test-master-secret")
+	credentials, err := newCredentialStore(db, "test-master-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings, err := newSettingsStore(cfg)
+	settings, err := newSettingsStore(db, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	customModels, err := newCustomModelStore(data)
+	customModels, err := newCustomModelStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,6 +400,7 @@ func newTestServer(t *testing.T) *apiServer {
 		providerName: "openrouter",
 		noTools:      true,
 		auth:         auth,
+		db:           db,
 		sessions:     map[string]*managedSession{},
 		loopFn: func(_ context.Context, _ *managedSession, prompt string, emit func(streamEvent)) (string, error) {
 			text := "hello:" + prompt

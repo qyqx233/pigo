@@ -144,7 +144,9 @@ type turnRun struct {
 	lastAlive    time.Time
 	final        *streamEvent
 	record       turnRecord
-	subs         map[*turnSub]struct{}
+	// ledger is the turn's usage, committed when it ends.
+	ledger []ledgerEntry
+	subs   map[*turnSub]struct{}
 
 	// transcriptStart is where this turn's user message sits in the
 	// transcript; history hides what follows it while the turn runs, because
@@ -153,7 +155,10 @@ type turnRun struct {
 	transcriptStart int
 	compacted       bool
 
-	// Step-limit wrap-up, touched only from the agent loop's goroutine.
+	// Step counting and the step-limit wrap-up, touched only from the agent
+	// loop's goroutine (see installHooks). counted is how much of the message
+	// list has been counted.
+	counted       int
 	wrapUpPending bool
 	wrapUpArmed   bool
 	stepLimited   bool
@@ -284,11 +289,6 @@ func (r *turnRun) observe(ev agentcore.AgentEvent) {
 			r.tool = ""
 			r.phaseSince = now
 		}
-	case agentcore.TurnEndEvent:
-		// Steps are counted from the results rather than the start events: a
-		// call the loop rejects (an unknown tool, bad arguments) never starts,
-		// but it is a step all the same.
-		r.steps += len(e.ToolResults)
 	case agentcore.CompactionEvent:
 		r.compacted = true
 	}
@@ -300,6 +300,22 @@ func (r *turnRun) observe(ev agentcore.AgentEvent) {
 	if alive {
 		r.onAlive()
 	}
+}
+
+// addLedger keeps usage entries for the turn's end.
+func (r *turnRun) addLedger(entries []ledgerEntry) {
+	r.mu.Lock()
+	r.ledger = append(r.ledger, entries...)
+	r.mu.Unlock()
+}
+
+// takeLedger hands over the kept entries.
+func (r *turnRun) takeLedger() []ledgerEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.ledger
+	r.ledger = nil
+	return out
 }
 
 func (r *turnRun) stepCount() int {
@@ -474,7 +490,8 @@ func turnMessage(reason string, steps int, limits turnLimits) string {
 	case turnShutdown:
 		return fmt.Sprintf("服务正在重启，本轮中断。%s，重启后可以发送“继续”。", kept)
 	case turnInterrupted:
-		return fmt.Sprintf("上一轮因服务意外退出而中断。%s，可以发送“继续”。", kept)
+		// Steps are not written until a turn ends, so their number is unknown.
+		return "上一轮因服务意外退出而中断。已完成的步骤保存在对话里，可以发送“继续”接着做。"
 	case turnSessionClosed:
 		return "会话已关闭。"
 	}
@@ -541,34 +558,72 @@ func (r *turnRun) brake(now time.Time) error {
 // message so it stays in the transcript and a later "继续" has the context.
 const stepLimitNote = "[系统] 本轮的工具调用已达 %d 次上限。请不要再调用工具：总结目前完成了什么、还剩哪些工作，然后停止。用户可以发送“继续”让你接着做。"
 
-// installHooks attaches the turn's per-step hooks to the loop configuration:
-// the step-limit wrap-up, and checkpoint, which runs after every step on the
-// loop's goroutine while the message list is stable. Existing hooks are kept.
-func (r *turnRun) installHooks(cfg *runtime.RunConfig, checkpoint func(*agentcore.AgentContext)) {
-	prevSteer := cfg.GetSteeringMessages
-	cfg.GetSteeringMessages = func(ctx context.Context) []agentcore.AgentMessage {
-		var out []agentcore.AgentMessage
-		if prevSteer != nil {
-			out = prevSteer(ctx)
+// installHooks attaches the turn's per-step hooks to the loop configuration.
+// Both run on the agent loop's goroutine after every step, while the message
+// list is stable — which is why steps are counted here and not from events:
+// the loop does not wait for its events to be handled, so an event-driven
+// count lags the loop by up to a step.
+//
+//   - PrepareNextTurn counts the step's tool results (a call the loop rejects,
+//     an unknown tool, never starts but is a step all the same) and, at the
+//     limit, appends the note asking the model to wrap up.
+//   - ShouldStopAfterTurn saves the checkpoint and, one step after the note,
+//     ends the turn.
+//
+// start is the length of the message list when the turn began. Existing hooks
+// are kept.
+func (r *turnRun) installHooks(cfg *runtime.RunConfig, start int, checkpoint func(*agentcore.AgentContext)) {
+	r.counted = start
+	prevPrepare := cfg.PrepareNextTurn
+	cfg.PrepareNextTurn = func(ctx context.Context, agentCtx *agentcore.AgentContext) *runtime.TurnUpdate {
+		var update *runtime.TurnUpdate
+		if prevPrepare != nil {
+			update = prevPrepare(ctx, agentCtx)
 		}
-		if r.limits.maxSteps > 0 && !r.wrapUpPending && !r.wrapUpArmed && r.stepCount() >= r.limits.maxSteps {
+		msgs := agentCtx.Messages
+		if update != nil && update.Messages != nil {
+			msgs = *update.Messages
+		}
+		if r.counted > len(msgs) {
+			r.counted = len(msgs)
+		}
+		added := 0
+		for _, m := range msgs[r.counted:] {
+			if _, ok := m.(agentcore.ToolResultMessage); ok {
+				added++
+			}
+		}
+		r.counted = len(msgs)
+		r.mu.Lock()
+		r.steps += added
+		steps := r.steps
+		r.mu.Unlock()
+
+		if r.limits.maxSteps > 0 && !r.wrapUpPending && !r.wrapUpArmed && steps >= r.limits.maxSteps {
 			r.wrapUpPending = true
-			out = append(out, agentcore.UserMessage{
+			next := append(append(agentcore.MessageList(nil), msgs...), agentcore.UserMessage{
 				RoleField: agentcore.RoleUser,
 				Content:   agentcore.ContentList{agentcore.NewTextContent(fmt.Sprintf(stepLimitNote, r.limits.maxSteps))},
 			})
+			r.counted = len(next)
+			if update == nil {
+				update = &runtime.TurnUpdate{}
+			}
+			update.Messages = &next
 		}
-		return out
+		return update
 	}
 	prevStop := cfg.ShouldStopAfterTurn
 	cfg.ShouldStopAfterTurn = func(ctx context.Context, agentCtx *agentcore.AgentContext) bool {
+		// Compaction may have rewritten the list since the count.
+		r.counted = len(agentCtx.Messages)
 		if checkpoint != nil {
 			checkpoint(agentCtx)
 		}
 		stop := prevStop != nil && prevStop(ctx, agentCtx)
 		switch {
 		case r.wrapUpPending:
-			// The note was just queued: give the model one more step to act on it.
+			// The note was just added: give the model one more step to act on it.
 			r.wrapUpPending = false
 			r.wrapUpArmed = true
 		case r.wrapUpArmed:

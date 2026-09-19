@@ -31,8 +31,11 @@ import (
 const maxRequestBody = 1 << 20 // 1 MiB
 
 type serverConfig struct {
-	listen      string
-	dataDir     string
+	listen  string
+	dataDir string
+	// dbURL is the -db value: sqlite:<path> or postgres://…; empty means
+	// <dataDir>/pigo.db.
+	dbURL       string
 	model       string
 	provider    string
 	thinking    string
@@ -68,6 +71,7 @@ type apiServer struct {
 	settings            *settingsStore
 	ledger              *ledgerStore
 	meter               *meter
+	db                  *sqlDB
 
 	mu       sync.RWMutex
 	sessions map[string]*managedSession
@@ -80,10 +84,12 @@ type managedSession struct {
 	live  *liveSandbox
 	// turn is the running turn, or the last one for a while after it ends
 	// (see turnRetention). activeTurn reports only a running one.
-	turn     *turnRun
-	closed   bool
-	agentCtx *agentcore.AgentContext
-	runCfg   runtime.RunConfig
+	turn   *turnRun
+	closed bool
+	// transcript tracks what of the agent's messages is stored.
+	transcript transcriptState
+	agentCtx   *agentcore.AgentContext
+	runCfg     runtime.RunConfig
 }
 
 type messageRequest struct {
@@ -137,12 +143,18 @@ type streamEvent struct {
 }
 
 func main() {
+	// "pigo-server migrate" moves the state of an older release, kept in JSON
+	// files, into the database.
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		os.Exit(runMigrate(os.Args[2:]))
+	}
 	cfg := serverConfig{
 		token:  os.Getenv("PIGO_SERVER_TOKEN"),
 		admins: parseAdminRoster(os.Getenv("PIGO_ADMIN_USERS")),
 	}
 	flag.StringVar(&cfg.listen, "listen", "127.0.0.1:8080", "HTTP listen address")
-	flag.StringVar(&cfg.dataDir, "data", defaultDataDir(), "session workspace root")
+	flag.StringVar(&cfg.dataDir, "data", defaultDataDir(), "data directory: session workspaces, and the SQLite database by default")
+	flag.StringVar(&cfg.dbURL, "db", os.Getenv("PIGO_DB"), "database: sqlite:<path> (default <data>/pigo.db) or postgres://user:pass@host/db; also PIGO_DB")
 	flag.StringVar(&cfg.model, "model", "openrouter/free", "model id")
 	flag.StringVar(&cfg.provider, "provider", "", "optional provider override")
 	flag.StringVar(&cfg.thinking, "thinking", "medium", "reasoning effort")
@@ -282,9 +294,29 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 	if !validThinking(cfg.thinking) {
 		return nil, fmt.Errorf("invalid thinking level %q", cfg.thinking)
 	}
+	// State left in the old JSON files would be silently ignored: refuse to
+	// start until it has been moved into the database.
+	if files := findLegacyFiles(cfg.dataDir); len(files) > 0 {
+		return nil, legacyFilesError(cfg.dataDir, files)
+	}
+	target, err := parseDBTarget(cfg.dbURL, cfg.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	db, err := openDB(target)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("pigo-server: database %s", target)
+	opened := false
+	defer func() {
+		if !opened {
+			db.Close()
+		}
+	}()
 	// Settings first: the default model may name a custom endpoint, which only
 	// the settings store knows about.
-	settings, err := newSettingsStore(cfg)
+	settings, err := newSettingsStore(db, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -298,23 +330,26 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 		log.Printf("pigo-server: sandbox unavailable: %v (bash tools will fail closed)", bwrapErr)
 	}
 	noTools, toolNames := configuredTools(cfg.tools)
-	sessions := loadSessions(cfg.dataDir)
-	auth, err := newAuthStore(cfg.dataDir)
+	sessions, err := loadSessions(db, cfg.dataDir)
 	if err != nil {
 		return nil, err
 	}
-	customModels, err := newCustomModelStore(cfg.dataDir)
+	auth, err := newAuthStore(db)
 	if err != nil {
 		return nil, err
 	}
-	credentials, err := newCredentialStore(cfg.dataDir, os.Getenv(credentialSecretEnv))
+	customModels, err := newCustomModelStore(db)
+	if err != nil {
+		return nil, err
+	}
+	credentials, err := newCredentialStore(db, os.Getenv(credentialSecretEnv))
 	if err != nil {
 		return nil, err
 	}
 	if !credentials.enabled() {
-		log.Printf("pigo-server: %s is not set; stored provider API keys are disabled (existing credentials.json is left untouched)", credentialSecretEnv)
+		log.Printf("pigo-server: %s is not set; stored provider API keys are disabled (the stored keys are left untouched)", credentialSecretEnv)
 	}
-	ledger, err := newLedgerStore(cfg.dataDir)
+	ledger, err := newLedgerStore(db)
 	if err != nil {
 		return nil, err
 	}
@@ -333,8 +368,10 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 		settings:            settings,
 		ledger:              ledger,
 		meter:               &meter{ledger: ledger, settings: settings},
+		db:                  db,
 		sessions:            sessions,
 	}
+	opened = true
 	if cfg.idleTimeout > 0 || cfg.emptySessionTTL > 0 {
 		go s.reapLoop()
 	}
@@ -418,8 +455,8 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 			LastUsed:  now,
 		},
 	}
-	if err := paths.saveMeta(managed.meta); err != nil {
-		_ = paths.remove()
+	if err := s.saveSession(managed.meta); err != nil {
+		_ = s.removeSession(id, paths)
 		writeError(w, http.StatusInternalServerError, "write session metadata")
 		return
 	}
@@ -427,7 +464,7 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 	s.mu.Lock()
 	if len(s.sessions) >= s.config.maxSessions {
 		s.mu.Unlock()
-		_ = paths.remove()
+		_ = s.removeSession(id, paths)
 		writeError(w, http.StatusServiceUnavailable, "session limit reached")
 		return
 	}
@@ -450,7 +487,7 @@ func (s *apiServer) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managed.meta.LastUsed = time.Now().UTC()
-	_ = managed.paths.saveMeta(managed.meta)
+	_ = s.saveSession(managed.meta)
 	writeJSON(w, http.StatusOK, sessionResponse(managed))
 }
 
@@ -501,7 +538,7 @@ func (s *apiServer) handleUpdateSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := managed.paths.saveMeta(managed.meta); err != nil {
+	if err := s.saveSession(managed.meta); err != nil {
 		writeError(w, http.StatusInternalServerError, "write session metadata")
 		return
 	}
@@ -534,7 +571,7 @@ func (s *apiServer) handleDeleteSession(w http.ResponseWriter, r *http.Request) 
 	managed.stopLive()
 	paths := managed.paths
 	managed.mu.Unlock()
-	if err := paths.remove(); err != nil {
+	if err := s.removeSession(id, paths); err != nil {
 		writeError(w, http.StatusInternalServerError, "remove session: "+err.Error())
 		return
 	}
@@ -585,7 +622,7 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = managed.paths.saveMeta(managed.meta)
+	_ = s.saveSession(managed.meta)
 	stream := r.URL.Query().Get("stream") == "true"
 	if complete {
 		// A command answered locally (/model, /help …) needs no turn, and may
@@ -761,6 +798,7 @@ func (s *apiServer) close() {
 		managed.stopLive()
 		managed.mu.Unlock()
 	}
+	s.db.Close()
 }
 
 func securityHeaders(next http.Handler) http.Handler {

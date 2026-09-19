@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,10 +13,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/run"
 	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
-	"github.com/smallnest/pigo/internal/session"
 )
-
-const transcriptID = "chat"
 
 func (s *apiServer) sandboxSpec(managed *managedSession) RunSpec {
 	return RunSpec{
@@ -125,24 +121,32 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 		Content:   agentcore.ContentList{agentcore.NewTextContent(prompt)},
 	})
 	cfg := managed.runCfg
-	header := transcriptHeader(managed.meta)
 	// Every model call the turn makes is metered under this turn, and the turn
 	// does not report itself finished until each call's cost is recorded — so
 	// the client sees the last "usage" event before "done".
 	turn := s.newTurn(managed, emit)
 	managed.mu.Unlock()
+	if runFrom(ctx) != nil {
+		// The turn's usage is committed with it when it ends.
+		turn.hold()
+	}
 
 	run := runFrom(ctx)
 	if run != nil {
 		run.setTranscriptStart(len(agentCtx.Messages) - 1)
-		run.installHooks(&cfg, func(ac *agentcore.AgentContext) {
-			s.checkpoint(managed, header, ac.Messages, run.stepCount())
+		run.installHooks(&cfg, len(agentCtx.Messages), func(ac *agentcore.AgentContext) {
+			s.checkpoint(managed, ac.Messages)
 		})
 	}
-	s.checkpoint(managed, header, agentCtx.Messages, 0)
+	s.checkpoint(managed, agentCtx.Messages)
 
 	ctx = withTurn(ctx, turn)
-	defer turn.wait(10 * time.Second)
+	defer func() {
+		turn.wait(10 * time.Second)
+		if run != nil {
+			run.addLedger(turn.release())
+		}
+	}()
 	stream := runtime.StartRun(ctx, agentCtx, cfg)
 	final, err := runtime.DrainStream(ctx, stream, runtime.StreamHandler{
 		OnText: func(delta string) {
@@ -172,11 +176,7 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 			}
 		},
 	})
-	steps := 0
-	if run != nil {
-		steps = run.stepCount()
-	}
-	s.checkpoint(managed, header, agentCtx.Messages, steps)
+	s.checkpoint(managed, agentCtx.Messages)
 	if err != nil {
 		return "", err
 	}
@@ -201,52 +201,19 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 	}
 }
 
-func (s *apiServer) loadTranscript(managed *managedSession) agentcore.MessageList {
-	store, err := session.NewStore(filepath.Join(managed.paths.Root, "transcript"))
-	if err != nil {
-		return nil
-	}
-	_, msgs, err := store.Load(transcriptID)
-	if err != nil {
-		return nil
-	}
-	return msgs
-}
-
-// transcriptHeader is the transcript's header for a session's current meta.
-func transcriptHeader(meta sessionMeta) session.SessionHeader {
-	return session.SessionHeader{
-		ID:        transcriptID,
-		CreatedAt: meta.CreatedAt,
-		Model:     meta.Model,
-		Provider:  meta.Provider,
-		Cwd:       virtualWorkspaceRoot,
-	}
-}
-
-// checkpoint saves the transcript during a turn, and the turn's step count
-// with it. It is called from the agent loop's goroutine while the message list
-// is stable. A closed session is not written: it is being deleted.
-func (s *apiServer) checkpoint(managed *managedSession, header session.SessionHeader, msgs agentcore.MessageList, steps int) {
+// checkpoint appends the step's messages to the transcript file. It is called
+// from the agent loop's goroutine while the message list is stable, and writes
+// no database row: the session's metadata and the turn's usage are committed
+// once, when the turn ends. A closed session is not written: it is being
+// deleted.
+func (s *apiServer) checkpoint(managed *managedSession, msgs agentcore.MessageList) {
 	managed.mu.Lock()
+	defer managed.mu.Unlock()
 	if managed.closed {
-		managed.mu.Unlock()
 		return
 	}
-	if active := managed.meta.ActiveTurn; active != nil && steps > active.Steps {
-		active.Steps = steps
-		_ = managed.paths.saveMeta(managed.meta)
-	}
-	root, id := managed.paths.Root, managed.meta.ID
-	managed.mu.Unlock()
-
-	store, err := session.NewStore(filepath.Join(root, "transcript"))
-	if err != nil {
-		return
-	}
-	header.UpdatedAt = time.Now().UTC()
-	if err := store.Save(header, msgs); err != nil {
-		log.Printf("pigo-server: session %s: save transcript: %v", shortID(id), err)
+	if err := s.saveTranscript(managed, msgs); err != nil {
+		log.Printf("pigo-server: session %s: save transcript: %v", shortID(managed.meta.ID), err)
 	}
 }
 

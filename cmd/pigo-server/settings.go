@@ -13,12 +13,11 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -86,17 +85,22 @@ func (c customProvider) validate() (customProvider, error) {
 	return c, nil
 }
 
+// settingsStore keeps the deployment settings as one JSON document, the
+// "server" row of the settings table. It is small and changed by hand, so it
+// is read and written whole.
 type settingsStore struct {
 	mu       sync.RWMutex
-	path     string
+	db       *sqlDB
 	settings serverSettings
 }
 
+const serverSettingsName = "server"
+
 // newSettingsStore loads the document, falling back to the defaults derived
 // from cfg when the file does not exist.
-func newSettingsStore(cfg serverConfig) (*settingsStore, error) {
+func newSettingsStore(db *sqlDB, cfg serverConfig) (*settingsStore, error) {
 	store := &settingsStore{
-		path: filepath.Join(cfg.dataDir, "settings.json"),
+		db: db,
 		settings: serverSettings{
 			DefaultModel:      cfg.model,
 			DefaultThinking:   cfg.thinking,
@@ -104,14 +108,18 @@ func newSettingsStore(cfg serverConfig) (*settingsStore, error) {
 			AllowUserKeys:     true,
 		},
 	}
-	data, err := os.ReadFile(store.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return store, nil
-		}
+	var doc string
+	found := false
+	if err := db.query("SELECT value FROM settings WHERE name = ?", func(rows *sql.Rows) error {
+		found = true
+		return rows.Scan(&doc)
+	}, serverSettingsName); err != nil {
 		return nil, fmt.Errorf("read settings: %w", err)
 	}
-	if err := json.Unmarshal(data, &store.settings); err != nil {
+	if !found {
+		return store, nil
+	}
+	if err := json.Unmarshal([]byte(doc), &store.settings); err != nil {
 		return nil, fmt.Errorf("decode settings: %w", err)
 	}
 	if strings.TrimSpace(store.settings.DefaultModel) == "" {
@@ -161,18 +169,17 @@ func (s *settingsStore) update(next serverSettings) (serverSettings, error) {
 }
 
 func (s *settingsStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.settings, "", "  ")
+	return saveSettingsDoc(s.db, s.settings)
+}
+
+func saveSettingsDoc(e sqlExec, settings serverSettings) error {
+	data, err := json.Marshal(settings)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if _, err := e.exec(`INSERT INTO settings (name, value) VALUES (?, ?)
+ON CONFLICT (name) DO UPDATE SET value = excluded.value`, serverSettingsName, string(data)); err != nil {
 		return fmt.Errorf("write settings: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit settings: %w", err)
 	}
 	return nil
 }

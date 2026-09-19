@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,18 +14,35 @@ import (
 
 const testSecret = "test-master-secret"
 
-func newStore(t *testing.T, dir, secret string) *credentialStore {
+func newStore(t *testing.T, db *sqlDB, secret string) *credentialStore {
 	t.Helper()
-	store, err := newCredentialStore(dir, secret)
+	store, err := newCredentialStore(db, secret)
 	if err != nil {
 		t.Fatalf("open credential store: %v", err)
 	}
 	return store
 }
 
+// credentialRows dumps the credentials table, for before/after comparisons.
+func credentialRows(t *testing.T, db *sqlDB) string {
+	t.Helper()
+	var b strings.Builder
+	if err := db.query("SELECT owner, provider, record FROM credentials ORDER BY owner, provider", func(rows *sql.Rows) error {
+		var owner, providerName, record string
+		if err := rows.Scan(&owner, &providerName, &record); err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s|%s|%s\n", owner, providerName, record)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
 // TestCredentialRoundTrip covers the ordinary lifecycle of one key.
 func TestCredentialRoundTrip(t *testing.T) {
-	store := newStore(t, t.TempDir(), testSecret)
+	store := newStore(t, openTestDB(t), testSecret)
 
 	if err := store.setUserKey("user-1", "deepseek", "sk-secret-value-1234"); err != nil {
 		t.Fatalf("set: %v", err)
@@ -55,8 +74,9 @@ func TestCredentialRoundTrip(t *testing.T) {
 // TestCredentialCiphertextOnDisk is the core security assertion: the key must
 // not be recoverable from the data directory alone.
 func TestCredentialCiphertextOnDisk(t *testing.T) {
-	dir := t.TempDir()
-	store := newStore(t, dir, testSecret)
+	path := filepath.Join(t.TempDir(), "pigo.db")
+	db := mustOpen(t, dbTarget{dialect: dialectSQLite, path: path})
+	store := newStore(t, db, testSecret)
 	const key = "sk-plaintext-must-not-appear"
 	if err := store.setUserKey("user-1", "openai", key); err != nil {
 		t.Fatal(err)
@@ -65,15 +85,22 @@ func TestCredentialCiphertextOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
+	rows := credentialRows(t, db)
+	if strings.Contains(rows, key) {
+		t.Fatal("the credentials table holds the key in plaintext")
 	}
-	if strings.Contains(string(raw), key) {
-		t.Fatal("credentials.json contains the key in plaintext")
+	if !strings.Contains(rows, "openai") {
+		t.Fatal("provider names are expected to stay readable")
 	}
-	if !strings.Contains(string(raw), "openai") {
-		t.Fatal("provider names are expected to stay readable; the file shape changed")
+	// Nor anywhere in the database files themselves.
+	for _, file := range []string{path, path + "-wal"} {
+		raw, err := os.ReadFile(file)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), key) {
+			t.Fatalf("%s contains the key in plaintext", filepath.Base(file))
+		}
 	}
 }
 
@@ -81,12 +108,12 @@ func TestCredentialCiphertextOnDisk(t *testing.T) {
 // secret degrades to "nothing configured" instead of returning garbage or
 // panicking.
 func TestCredentialWrongSecret(t *testing.T) {
-	dir := t.TempDir()
-	if err := newStore(t, dir, testSecret).setUserKey("user-1", "openai", "sk-original"); err != nil {
+	db := openTestDB(t)
+	if err := newStore(t, db, testSecret).setUserKey("user-1", "openai", "sk-original"); err != nil {
 		t.Fatal(err)
 	}
 
-	other := newStore(t, dir, "a-different-secret")
+	other := newStore(t, db, "a-different-secret")
 	if got := other.resolve("user-1", "openai", true); got != "" {
 		t.Errorf("resolve with the wrong secret = %q, want empty", got)
 	}
@@ -104,38 +131,27 @@ func TestCredentialWrongSecret(t *testing.T) {
 // to its slot: a ciphertext moved from one user to another, or into the public
 // pool, must not open.
 func TestCredentialSlotBinding(t *testing.T) {
-	dir := t.TempDir()
-	store := newStore(t, dir, testSecret)
+	db := openTestDB(t)
+	store := newStore(t, db, testSecret)
 	if err := store.setUserKey("user-1", "openai", "sk-user-one"); err != nil {
 		t.Fatal(err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state credentialState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatal(err)
-	}
-	record := state.Users["user-1"]["openai"]
-	if record == "" {
-		t.Fatal("no record written")
+	var record string
+	if err := db.query("SELECT record FROM credentials WHERE owner = ? AND provider = ?", func(rows *sql.Rows) error {
+		return rows.Scan(&record)
+	}, "user-1", "openai"); err != nil || record == "" {
+		t.Fatalf("no record written: %v", err)
 	}
 
-	// Move the same ciphertext into three other slots by hand.
-	state.Users["user-2"] = map[string]string{"openai": record}
-	state.Public = map[string]string{"openai": record}
-	state.Users["user-1"]["anthropic"] = record
-	moved, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), moved, 0o600); err != nil {
-		t.Fatal(err)
+	// Copy the same ciphertext into three other slots by hand.
+	for _, slot := range [][2]string{{"user-2", "openai"}, {"", "openai"}, {"user-1", "anthropic"}} {
+		if _, err := db.exec("INSERT INTO credentials (owner, provider, record) VALUES (?, ?, ?)", slot[0], slot[1], record); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	tampered := newStore(t, dir, testSecret)
+	tampered := newStore(t, db, testSecret)
 	if got := tampered.resolve("user-2", "openai", true); got != "" {
 		t.Errorf("a record moved to another user opened: %q", got)
 	}
@@ -152,16 +168,13 @@ func TestCredentialSlotBinding(t *testing.T) {
 // with a reason, reads report nothing, and an existing file survives untouched
 // so setting the secret later restores the data.
 func TestCredentialDisabled(t *testing.T) {
-	dir := t.TempDir()
-	if err := newStore(t, dir, testSecret).setUserKey("user-1", "openai", "sk-survives"); err != nil {
+	db := openTestDB(t)
+	if err := newStore(t, db, testSecret).setUserKey("user-1", "openai", "sk-survives"); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(filepath.Join(dir, "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := credentialRows(t, db)
 
-	disabled := newStore(t, dir, "")
+	disabled := newStore(t, db, "")
 	if disabled.enabled() {
 		t.Fatal("a store with no secret must report disabled")
 	}
@@ -182,21 +195,17 @@ func TestCredentialDisabled(t *testing.T) {
 		t.Errorf("dropUser on a disabled store = %v", err)
 	}
 
-	after, err := os.ReadFile(filepath.Join(dir, "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
+	if after := credentialRows(t, db); before != after {
+		t.Fatal("a disabled store must not touch the stored keys")
 	}
-	if string(before) != string(after) {
-		t.Fatal("a disabled store must not rewrite credentials.json")
-	}
-	if got := newStore(t, dir, testSecret).resolve("user-1", "openai", true); got != "sk-survives" {
+	if got := newStore(t, db, testSecret).resolve("user-1", "openai", true); got != "sk-survives" {
 		t.Errorf("data must survive a restart without the secret, got %q", got)
 	}
 }
 
 // TestCredentialPrecedence pins the tier order the spec promises.
 func TestCredentialPrecedence(t *testing.T) {
-	store := newStore(t, t.TempDir(), testSecret)
+	store := newStore(t, openTestDB(t), testSecret)
 	if err := store.setPublicKey("openai", "sk-public"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +240,7 @@ func TestCredentialPrecedence(t *testing.T) {
 
 // TestCredentialDropUser covers the account-deletion path.
 func TestCredentialDropUser(t *testing.T) {
-	store := newStore(t, t.TempDir(), testSecret)
+	store := newStore(t, openTestDB(t), testSecret)
 	for _, name := range []string{"openai", "groq"} {
 		if err := store.setUserKey("user-1", name, "sk-"+name); err != nil {
 			t.Fatal(err)
@@ -253,7 +262,7 @@ func TestCredentialDropUser(t *testing.T) {
 
 // TestCredentialRejectsBadInput covers the validation on the write path.
 func TestCredentialRejectsBadInput(t *testing.T) {
-	store := newStore(t, t.TempDir(), testSecret)
+	store := newStore(t, openTestDB(t), testSecret)
 	if err := store.setUserKey("user-1", "openai", "   "); err == nil {
 		t.Error("a blank key must be rejected")
 	}
@@ -369,7 +378,7 @@ func TestCredentialAPIHonorsTheUserKeySwitch(t *testing.T) {
 // secret says so instead of silently dropping the key.
 func TestCredentialAPIDisabledReportsReason(t *testing.T) {
 	server := newTestServer(t)
-	server.credentials = newStore(t, t.TempDir(), "")
+	server.credentials = newStore(t, server.db, "")
 
 	request := userRequest(t, http.MethodPut, "/api/credentials/openai", `{"key":"sk-x"}`, "user-1", "alice", false)
 	request.SetPathValue("provider", "openai")

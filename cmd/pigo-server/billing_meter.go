@@ -40,6 +40,44 @@ type turnInfo struct {
 	// pending counts calls whose outcome is not yet recorded, so the turn can
 	// wait for them before it reports that it is done.
 	pending sync.WaitGroup
+
+	// While holding, recorded entries are kept here instead of written: a
+	// turn's calls are committed together, with the session's metadata, when
+	// the turn ends (finishTurn). A process that crashes mid-turn loses them;
+	// that is the accepted price of one commit per turn.
+	mu      sync.Mutex
+	holding bool
+	held    []ledgerEntry
+}
+
+// hold starts keeping the turn's entries for its end.
+func (t *turnInfo) hold() {
+	t.mu.Lock()
+	t.holding = true
+	t.mu.Unlock()
+}
+
+// keep takes an entry while holding, reporting false otherwise (the caller
+// then writes it itself).
+func (t *turnInfo) keep(e ledgerEntry) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.holding {
+		return false
+	}
+	t.held = append(t.held, e)
+	return true
+}
+
+// release stops holding and hands over what was kept. An entry recorded
+// afterwards — a call that outlived the turn's wait — is written directly.
+func (t *turnInfo) release() []ledgerEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.holding = false
+	out := t.held
+	t.held = nil
+	return out
 }
 
 type turnInfoKey struct{}
@@ -241,7 +279,9 @@ func (m *meter) record(turn *turnInfo, c call, msg agentcore.AssistantMessage, s
 		entry.Priced = true
 		entry.Cost = rate(usage, price)
 	}
-	if err := m.ledger.append(entry); err != nil {
+	if turn.keep(entry) {
+		// Committed when the turn ends.
+	} else if err := m.ledger.append(entry); err != nil {
 		// A failed audit write must not fail the user's turn; it is logged
 		// with enough detail to reconstruct the entry.
 		log.Printf("pigo-server: ledger write failed: %v (user %s session %s model %s in %d cache %d/%d out %d)",

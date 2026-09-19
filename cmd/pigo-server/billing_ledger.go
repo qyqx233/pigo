@@ -1,4 +1,4 @@
-// The usage ledger: one line per model call, append-only.
+// The usage ledger: one row per model call, append-only.
 //
 // It is an audit record, so it is never rewritten: a price change applies to
 // later calls only (each entry carries the price it was charged at), and
@@ -6,19 +6,15 @@
 // from session transcripts for the same reason — those are deleted with the
 // session, and the money spent is not.
 //
-// Files are split by month (<dataDir>/ledger/2026-09.jsonl) so a report over a
-// period reads only the months it covers.
+// Reports select by period, user, session and model; the table is indexed for
+// each, so a report reads only the rows it covers.
 package main
 
 import (
-	"bufio"
+	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"sync"
+	"strings"
 	"time"
 )
 
@@ -91,44 +87,81 @@ func billedToFor(keySource string) string {
 }
 
 type ledgerStore struct {
-	mu  sync.Mutex
-	dir string
+	db *sqlDB
 }
 
-func newLedgerStore(dataDir string) (*ledgerStore, error) {
-	dir := filepath.Join(dataDir, "ledger")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create ledger dir: %w", err)
-	}
-	return &ledgerStore{dir: dir}, nil
+func newLedgerStore(db *sqlDB) (*ledgerStore, error) {
+	return &ledgerStore{db: db}, nil
 }
 
-func (l *ledgerStore) monthPath(at time.Time) string {
-	return filepath.Join(l.dir, at.UTC().Format("2006-01")+".jsonl")
-}
+// ledgerColumns lists the columns in the order insertLedgerEntry writes them
+// and scanLedgerEntry reads them.
+const ledgerColumns = `id, at, user_id, username, session_id, turn_id, response_id, provider, model, response_model,
+kind, status, key_source, billed_to, input, cache_read, cache_write, output, reasoning,
+price, priced, cost, upstream_cost_usd, usage_anomaly`
 
-// append writes one entry. Each entry is a single write of one line to a file
-// opened in append mode, under a lock, so concurrent calls cannot interleave.
+// append records one entry at once. The calls of a turn are not written this
+// way: they are kept with the turn and committed when it ends (turnRun,
+// finishTurn); this is for a call made outside any turn.
 func (l *ledgerStore) append(entry ledgerEntry) error {
 	if l == nil {
 		return nil
 	}
-	line, err := json.Marshal(entry)
-	if err != nil {
-		return err
+	return insertLedgerEntry(l.db, entry)
+}
+
+func insertLedgerEntry(e sqlExec, entry ledgerEntry) error {
+	var price sql.NullString
+	if entry.Price != nil {
+		raw, err := json.Marshal(entry.Price)
+		if err != nil {
+			return err
+		}
+		price = sql.NullString{String: string(raw), Valid: true}
 	}
-	line = append(line, '\n')
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	f, err := os.OpenFile(l.monthPath(entry.At), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open ledger: %w", err)
+	var upstream sql.NullFloat64
+	if entry.UpstreamCostUSD != nil {
+		upstream = sql.NullFloat64{Float64: *entry.UpstreamCostUSD, Valid: true}
 	}
-	if _, err := f.Write(line); err != nil {
-		_ = f.Close()
+	_, err := e.exec("INSERT INTO ledger ("+ledgerColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		entry.ID, toNanos(entry.At), entry.UserID, entry.Username, entry.SessionID, entry.TurnID, entry.ResponseID,
+		entry.Provider, entry.Model, entry.ResponseModel, entry.Kind, entry.Status, entry.KeySource, entry.BilledTo,
+		entry.Input, entry.CacheRead, entry.CacheWrite, entry.Output, entry.Reasoning,
+		price, boolInt(entry.Priced), entry.Cost, upstream, boolInt(entry.UsageAnomaly))
+	if err != nil {
 		return fmt.Errorf("write ledger: %w", err)
 	}
-	return f.Close()
+	return nil
+}
+
+func scanLedgerEntry(rows *sql.Rows) (ledgerEntry, error) {
+	var (
+		e               ledgerEntry
+		at              int64
+		price           sql.NullString
+		priced, anomaly int
+		upstream        sql.NullFloat64
+	)
+	if err := rows.Scan(&e.ID, &at, &e.UserID, &e.Username, &e.SessionID, &e.TurnID, &e.ResponseID,
+		&e.Provider, &e.Model, &e.ResponseModel, &e.Kind, &e.Status, &e.KeySource, &e.BilledTo,
+		&e.Input, &e.CacheRead, &e.CacheWrite, &e.Output, &e.Reasoning,
+		&price, &priced, &e.Cost, &upstream, &anomaly); err != nil {
+		return e, err
+	}
+	e.At = fromNanos(at)
+	if price.Valid {
+		var snap priceSnapshot
+		if err := json.Unmarshal([]byte(price.String), &snap); err == nil {
+			e.Price = &snap
+		}
+	}
+	e.Priced = priced != 0
+	e.UsageAnomaly = anomaly != 0
+	if upstream.Valid {
+		v := upstream.Float64
+		e.UpstreamCostUSD = &v
+	}
+	return e, nil
 }
 
 // ledgerQuery narrows a scan. Zero fields do not filter.
@@ -140,85 +173,47 @@ type ledgerQuery struct {
 	Model     string
 }
 
-func (q ledgerQuery) matches(e ledgerEntry) bool {
-	if !q.From.IsZero() && e.At.Before(q.From) {
-		return false
-	}
-	if !q.To.IsZero() && !e.At.Before(q.To) {
-		return false
-	}
-	if q.UserID != "" && e.UserID != q.UserID {
-		return false
-	}
-	if q.SessionID != "" && e.SessionID != q.SessionID {
-		return false
-	}
-	if q.Provider != "" && e.Provider != q.Provider {
-		return false
-	}
-	if q.Model != "" && e.Model != q.Model && e.ResponseModel != q.Model {
-		return false
-	}
-	return true
-}
-
-// scan returns the entries matching q, oldest first. Only the month files the
-// period can touch are read. A malformed line is skipped rather than failing
-// the whole report: one bad write must not hide a month of accounting.
+// scan returns the entries matching q, oldest first.
 func (l *ledgerStore) scan(q ledgerQuery) ([]ledgerEntry, error) {
 	if l == nil {
 		return nil, nil
 	}
-	names, err := filepath.Glob(filepath.Join(l.dir, "*.jsonl"))
-	if err != nil {
-		return nil, err
+	var (
+		where []string
+		args  []any
+	)
+	if !q.From.IsZero() {
+		where, args = append(where, "at >= ?"), append(args, toNanos(q.From))
 	}
-	sort.Strings(names)
+	if !q.To.IsZero() {
+		where, args = append(where, "at < ?"), append(args, toNanos(q.To))
+	}
+	if q.UserID != "" {
+		where, args = append(where, "user_id = ?"), append(args, q.UserID)
+	}
+	if q.SessionID != "" {
+		where, args = append(where, "session_id = ?"), append(args, q.SessionID)
+	}
+	if q.Provider != "" {
+		where, args = append(where, "provider = ?"), append(args, q.Provider)
+	}
+	if q.Model != "" {
+		// A call counts under the model asked for and the model that answered.
+		where, args = append(where, "(model = ? OR response_model = ?)"), append(args, q.Model, q.Model)
+	}
+	query := "SELECT " + ledgerColumns + " FROM ledger"
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY at, id"
 	var out []ledgerEntry
-	for _, name := range names {
-		month, err := time.Parse("2006-01", filepath.Base(name[:len(name)-len(".jsonl")]))
+	err := l.db.query(query, func(rows *sql.Rows) error {
+		e, err := scanLedgerEntry(rows)
 		if err != nil {
-			continue
+			return err
 		}
-		if !q.From.IsZero() && !month.AddDate(0, 1, 0).After(q.From) {
-			continue
-		}
-		if !q.To.IsZero() && !month.Before(q.To) {
-			continue
-		}
-		entries, err := l.readFile(name)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range entries {
-			if q.matches(e) {
-				out = append(out, e)
-			}
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
-	return out, nil
-}
-
-func (l *ledgerStore) readFile(name string) ([]ledgerEntry, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	f, err := os.Open(name)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-	var out []ledgerEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		var e ledgerEntry
-		if json.Unmarshal(scanner.Bytes(), &e) == nil {
-			out = append(out, e)
-		}
-	}
-	return out, scanner.Err()
+		out = append(out, e)
+		return nil
+	}, args...)
+	return out, err
 }

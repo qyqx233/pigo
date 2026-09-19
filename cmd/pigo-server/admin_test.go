@@ -147,7 +147,7 @@ func TestAdminSettingsRoundTrip(t *testing.T) {
 	}
 
 	// Settings survive a restart.
-	reopened, err := newSettingsStore(server.config)
+	reopened, err := newSettingsStore(server.db, server.config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestPublicModelRejectsExpiry(t *testing.T) {
 }
 
 // TestCustomModelScopeMigration verifies entries written before scopes existed
-// are read back as user entries rather than becoming shared.
+// are imported as user entries rather than becoming shared.
 func TestCustomModelScopeMigration(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "models"), 0o700); err != nil {
@@ -331,7 +331,11 @@ func TestCustomModelScopeMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := newCustomModelStore(dir)
+	db := openTestDB(t)
+	if _, err := importLegacy(dir, db); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newCustomModelStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,14 +345,6 @@ func TestCustomModelScopeMigration(t *testing.T) {
 	own := store.list("user-1")
 	if len(own) != 1 || own[0].Scope != modelScopeUser {
 		t.Fatalf("legacy entry = %+v, want scope %q", own, modelScopeUser)
-	}
-	// The migration is persisted, not re-derived on every load.
-	raw, err := os.ReadFile(filepath.Join(dir, "models", "models.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), `"scope": "user"`) {
-		t.Errorf("the migration was not written back: %s", raw)
 	}
 }
 

@@ -12,8 +12,12 @@ import (
 )
 
 func TestCustomModelStoreAddListRemoveAndReload(t *testing.T) {
-	dir := t.TempDir()
-	store, err := newCustomModelStore(dir)
+	forEachDB(t, testCustomModelStore)
+}
+
+func testCustomModelStore(t *testing.T, target dbTarget) {
+	db := mustOpen(t, target)
+	store, err := newCustomModelStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +51,9 @@ func TestCustomModelStoreAddListRemoveAndReload(t *testing.T) {
 		t.Fatalf("after renew list(u1) = %+v", owns)
 	}
 
-	reloaded, err := newCustomModelStore(dir)
+	db.Close()
+	db = mustOpen(t, target)
+	reloaded, err := newCustomModelStore(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +93,7 @@ func addCustomModelForTest(t *testing.T, server *apiServer, body string) *httpte
 func TestHandleAddCustomModelValidatesInput(t *testing.T) {
 	server := newTestServer(t)
 	var err error
-	server.customModels, err = newCustomModelStore(server.config.dataDir)
+	server.customModels, err = newCustomModelStore(server.db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +133,7 @@ func TestHandleModelsMergesUnexpiredCustomModels(t *testing.T) {
 
 	server := &apiServer{modelHTTPClient: upstream.Client(), openRouterModelsURL: upstream.URL}
 	var err error
-	server.customModels, err = newCustomModelStore(t.TempDir())
+	server.customModels, err = newCustomModelStore(openTestDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +175,7 @@ func TestHandleModelsServesCustomsWhenOpenRouterFails(t *testing.T) {
 
 	server := &apiServer{modelHTTPClient: upstream.Client(), openRouterModelsURL: upstream.URL}
 	var err error
-	server.customModels, err = newCustomModelStore(t.TempDir())
+	server.customModels, err = newCustomModelStore(openTestDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +193,7 @@ func TestHandleModelsServesCustomsWhenOpenRouterFails(t *testing.T) {
 func TestUpdateSessionRejectsExpiredCustomModel(t *testing.T) {
 	server := newTestServer(t)
 	var err error
-	server.customModels, err = newCustomModelStore(server.config.dataDir)
+	server.customModels, err = newCustomModelStore(server.db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +214,7 @@ func TestUpdateSessionRejectsExpiredCustomModel(t *testing.T) {
 func TestHandleMessageRejectsExpiredCustomModel(t *testing.T) {
 	server := newTestServer(t)
 	var err error
-	server.customModels, err = newCustomModelStore(server.config.dataDir)
+	server.customModels, err = newCustomModelStore(server.db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +279,7 @@ func TestHandleListProviders(t *testing.T) {
 func TestHandleDeleteCustomModel(t *testing.T) {
 	server := newTestServer(t)
 	var err error
-	server.customModels, err = newCustomModelStore(server.config.dataDir)
+	server.customModels, err = newCustomModelStore(server.db)
 	if err != nil {
 		t.Fatal(err)
 	}
