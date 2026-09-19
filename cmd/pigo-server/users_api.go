@@ -200,6 +200,7 @@ func (s *apiServer) closeUserSessions(userID string, removeData bool) (int, []st
 
 	var problems []string
 	for _, managed := range targets {
+		s.closeTurn(managed, errTurnSessionClosed)
 		managed.mu.Lock()
 		if removeData {
 			managed.closed = true

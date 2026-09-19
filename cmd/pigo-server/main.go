@@ -31,18 +31,24 @@ import (
 const maxRequestBody = 1 << 20 // 1 MiB
 
 type serverConfig struct {
-	listen          string
-	dataDir         string
-	model           string
-	provider        string
-	thinking        string
-	tools           string
-	skills          bool
-	token           string
-	admins          adminRoster
-	maxSessions     int
-	requestLimit    time.Duration
-	idleTimeout     time.Duration
+	listen      string
+	dataDir     string
+	model       string
+	provider    string
+	thinking    string
+	tools       string
+	skills      bool
+	token       string
+	admins      adminRoster
+	maxSessions int
+	idleTimeout time.Duration
+	// turnIdle, turnMax and turnMaxSteps are a turn's brakes (turnrun.go).
+	turnIdle     time.Duration
+	turnMax      time.Duration
+	turnMaxSteps int
+	// turnTick is how often the brakes are checked; zero means the default.
+	// Not a flag: tests shorten it.
+	turnTick        time.Duration
 	emptySessionTTL time.Duration
 }
 
@@ -68,11 +74,13 @@ type apiServer struct {
 }
 
 type managedSession struct {
-	mu       sync.Mutex
-	paths    sessionPaths
-	meta     sessionMeta
-	live     *liveSandbox
-	busy     bool
+	mu    sync.Mutex
+	paths sessionPaths
+	meta  sessionMeta
+	live  *liveSandbox
+	// turn is the running turn, or the last one for a while after it ends
+	// (see turnRetention). activeTurn reports only a running one.
+	turn     *turnRun
 	closed   bool
 	agentCtx *agentcore.AgentContext
 	runCfg   runtime.RunConfig
@@ -112,6 +120,20 @@ type streamEvent struct {
 	IsError bool   `json:"isError,omitempty"`
 	// Usage is the "usage" event's payload: one model call's tokens and cost.
 	Usage *usageReport `json:"usage,omitempty"`
+
+	// The fields below belong to turn streams (turnrun.go).
+	//
+	// Usages is the "snapshot" event's list of the turn's calls so far.
+	Usages []*usageReport `json:"usages,omitempty"`
+	// Steps counts the turn's tool calls so far.
+	Steps     int        `json:"steps,omitempty"`
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+	// ElapsedMs is how long the "heartbeat" event's phase has lasted.
+	ElapsedMs int64 `json:"elapsedMs,omitempty"`
+	// Reason is why the turn ended ("done", "stalled", …), on its final event.
+	Reason string `json:"reason,omitempty"`
+	// Detail explains a turn that finished but not simply (the step limit).
+	Detail string `json:"detail,omitempty"`
 }
 
 func main() {
@@ -127,7 +149,11 @@ func main() {
 	flag.StringVar(&cfg.tools, "tools", "", "comma-separated tool allowlist; empty disables tools, 'all' enables all tools")
 	flag.BoolVar(&cfg.skills, "skills", false, "bind the host skills directory into the sandbox (off by default)")
 	flag.IntVar(&cfg.maxSessions, "max-sessions", 32, "maximum live browser sessions")
-	flag.DurationVar(&cfg.requestLimit, "request-timeout", 10*time.Minute, "maximum duration of one agent request")
+	flag.DurationVar(&cfg.turnIdle, "turn-idle", 10*time.Minute, "stop a turn that makes no progress (no model output, no tool starting or finishing) for this long; 0 disables")
+	flag.DurationVar(&cfg.turnMax, "turn-max", 2*time.Hour, "stop a turn that runs longer than this in total; 0 disables")
+	flag.IntVar(&cfg.turnMaxSteps, "turn-max-steps", 200, "ask the model to wrap up after this many tool calls in one turn; 0 disables")
+	var requestTimeout time.Duration
+	flag.DurationVar(&requestTimeout, "request-timeout", 0, "deprecated: use -turn-max")
 	flag.DurationVar(&cfg.idleTimeout, "idle", 30*time.Minute, "stop an idle sandbox process after this duration; 0 disables idle expiry. Disk state is kept. There is no maximum lifetime.")
 	flag.DurationVar(&cfg.emptySessionTTL, "empty-session-ttl", time.Hour, "delete sessions with no transcript and an empty workspace after this duration; 0 disables cleanup")
 	flag.Parse()
@@ -135,8 +161,12 @@ func main() {
 	if cfg.maxSessions < 1 {
 		log.Fatal("-max-sessions must be at least 1")
 	}
-	if cfg.requestLimit <= 0 {
-		log.Fatal("-request-timeout must be positive")
+	if requestTimeout > 0 {
+		log.Printf("pigo-server: -request-timeout is deprecated; it now sets -turn-max (a turn no longer ends with the request that started it)")
+		cfg.turnMax = requestTimeout
+	}
+	if cfg.turnIdle < 0 || cfg.turnMax < 0 || cfg.turnMaxSteps < 0 {
+		log.Fatal("-turn-idle, -turn-max and -turn-max-steps cannot be negative")
 	}
 	if cfg.emptySessionTTL < 0 {
 		log.Fatal("-empty-session-ttl cannot be negative")
@@ -163,6 +193,8 @@ func main() {
 	mux.Handle("GET /api/sessions/{id}/commands", api.requirePrincipal(http.HandlerFunc(api.handleCommands)))
 	mux.Handle("GET /api/sessions/{id}/messages", api.requirePrincipal(http.HandlerFunc(api.handleSessionMessages)))
 	mux.Handle("POST /api/sessions/{id}/messages", api.requirePrincipal(http.HandlerFunc(api.handleMessage)))
+	mux.Handle("GET /api/sessions/{id}/turn", api.requirePrincipal(http.HandlerFunc(api.handleAttachTurn)))
+	mux.Handle("POST /api/sessions/{id}/turn/cancel", api.requirePrincipal(http.HandlerFunc(api.handleCancelTurn)))
 	mux.Handle("GET /api/sessions/{id}/usage", api.requirePrincipal(http.HandlerFunc(api.handleSessionUsage)))
 	mux.Handle("GET /api/sessions/{id}/files", api.requirePrincipal(http.HandlerFunc(api.handleListFiles)))
 	mux.Handle("GET /api/sessions/{id}/files/raw", api.requirePrincipal(http.HandlerFunc(api.handleReadFile)))
@@ -229,6 +261,9 @@ func main() {
 			log.Fatal(err)
 		}
 	case <-ctx.Done():
+		// Turns outlive requests, so they are stopped first: each saves what
+		// it has and tells its clients, then the connections can drain.
+		api.stopAllTurns(8 * time.Second)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -491,6 +526,9 @@ func (s *apiServer) handleDeleteSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A running turn is stopped and given a moment to finish before the files
+	// go: it would otherwise write its transcript into a deleted directory.
+	s.closeTurn(managed, errTurnSessionClosed)
 	managed.mu.Lock()
 	managed.closed = true
 	managed.stopLive()
@@ -522,14 +560,17 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The session lock is held only to set the turn up: the turn itself runs
+	// in the background, and this request merely subscribes to it.
 	managed.mu.Lock()
-	defer managed.mu.Unlock()
 	if managed.closed {
+		managed.mu.Unlock()
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	managed.meta.LastUsed = time.Now().UTC()
 	if m, expired := s.expiredCustomModel(r, managed.meta.Model); expired {
+		managed.mu.Unlock()
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("custom model %q expired on %s; switch model before sending", m.ID, m.ExpiresAt))
 		return
 	}
@@ -540,92 +581,42 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	prompt, prefix, complete, err := resolveWebInput(&managed.meta, request.Prompt, s.resolverFor(userID),
 		func(filter string) string { return s.modelListing(r, userID, filter) })
 	if err != nil {
+		managed.mu.Unlock()
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	_ = managed.paths.saveMeta(managed.meta)
-
-	ctx, cancel := context.WithTimeout(r.Context(), s.config.requestLimit)
-	defer cancel()
-	if r.URL.Query().Get("stream") == "true" {
-		if complete {
-			writeStreamText(w, prefix)
-			return
-		}
-		s.streamMessage(ctx, w, id, managed, prompt, prefix)
-		return
-	}
-
+	stream := r.URL.Query().Get("stream") == "true"
 	if complete {
-		writeJSON(w, http.StatusOK, map[string]string{"reply": prefix})
+		// A command answered locally (/model, /help …) needs no turn, and may
+		// run while one is in progress: a setting change applies to the next.
+		managed.mu.Unlock()
+		if stream {
+			writeStreamText(w, prefix)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]string{"reply": prefix})
+		}
 		return
 	}
-	reply, runErr := s.runMessage(ctx, managed, prompt)
-	if runErr != nil {
-		log.Printf("pigo-server: session %s: agent request failed: %v", shortID(id), runErr)
-		writeError(w, statusForError(runErr), runErr.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"reply": prefixText(prefix, reply)})
-}
-
-func (s *apiServer) streamMessage(ctx context.Context, w http.ResponseWriter, id string, managed *managedSession, prompt, prefix string) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming is not supported")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	encoder := json.NewEncoder(w)
-	var writeErr error
-	// emit is called from more than one goroutine: the run's event drain, and
-	// the billing meter reporting usage as each model call finishes. The mutex
-	// keeps their lines from interleaving on the wire.
-	//
-	// finished closes the stream to late writers: once the handler returns,
-	// the ResponseWriter must not be touched.
-	var emitMu sync.Mutex
-	finished := false
-	defer func() {
-		emitMu.Lock()
-		finished = true
-		emitMu.Unlock()
-	}()
-	emit := func(event streamEvent) {
-		emitMu.Lock()
-		defer emitMu.Unlock()
-		if finished || writeErr != nil {
+	// Fail before starting a turn that could not run a single tool.
+	if s.loopFn == nil && s.needsSandbox() {
+		if err := s.sandbox.Ready(); err != nil {
+			managed.mu.Unlock()
+			writeError(w, http.StatusServiceUnavailable, "sandbox unavailable: "+err.Error())
 			return
 		}
-		if err := encoder.Encode(event); err != nil {
-			writeErr = err
-			return
-		}
-		flusher.Flush()
 	}
-
-	if prefix != "" {
-		emit(streamEvent{Type: "delta", Text: prefix + "\n\n"})
-	}
-	reply, err := s.runMessage(ctx, managed, prompt, emit)
-	emitMu.Lock()
-	failed := writeErr != nil
-	emitMu.Unlock()
-	if failed {
-		return
-	}
+	run, snapshot, sub, err := s.startTurn(managed, prompt, prefix)
+	managed.mu.Unlock()
 	if err != nil {
-		log.Printf("pigo-server: session %s: streaming agent request failed: %v", shortID(id), err)
-		emit(streamEvent{Type: "error", Error: err.Error()})
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	emit(streamEvent{Type: "done", Text: prefixText(prefix, reply)})
+	if stream {
+		s.streamTurn(w, r, run, snapshot, sub, nil)
+		return
+	}
+	s.waitTurn(w, r, run, sub)
 }
 
 func (s *apiServer) runMessage(ctx context.Context, managed *managedSession, prompt string, emit ...func(streamEvent)) (string, error) {
@@ -641,8 +632,6 @@ func (s *apiServer) runMessage(ctx context.Context, managed *managedSession, pro
 			return "", fmt.Errorf("sandbox unavailable: %w", err)
 		}
 	}
-	managed.busy = true
-	defer func() { managed.busy = false }()
 	return s.runHostLoop(ctx, managed, prompt, emitFn)
 }
 
@@ -766,6 +755,7 @@ func (s *apiServer) close() {
 	}
 	s.mu.Unlock()
 	for _, managed := range sessions {
+		s.closeTurn(managed, errTurnShutdown)
 		managed.mu.Lock()
 		managed.closed = true
 		managed.stopLive()
@@ -798,7 +788,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 func sessionResponse(managed *managedSession) map[string]any {
 	m := managed.meta
 	tools := append([]string{}, m.Tools...)
-	return map[string]any{
+	out := map[string]any{
 		"id":            m.ID,
 		"title":         m.Title,
 		"model":         m.Model,
@@ -811,17 +801,15 @@ func sessionResponse(managed *managedSession) map[string]any {
 		"sandbox":       "bwrap",
 		"alive":         managed.liveAlive(),
 	}
-}
-
-func statusForError(err error) int {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusGatewayTimeout
+	// turn is the running (or just-finished) turn; lastTurn how the last one
+	// ended, which survives restarts — including a turn a crash interrupted.
+	if managed.turn != nil {
+		out["turn"] = managed.turn.info()
 	}
-	msg := err.Error()
-	if strings.Contains(msg, "sandbox unavailable") {
-		return http.StatusServiceUnavailable
+	if m.LastTurn != nil {
+		out["lastTurn"] = m.LastTurn
 	}
-	return http.StatusBadGateway
+	return out
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

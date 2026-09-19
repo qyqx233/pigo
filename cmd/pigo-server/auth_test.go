@@ -136,8 +136,9 @@ func TestSessionOwnershipAndHistory(t *testing.T) {
 		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("继续这个历史问题")}},
 		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent("这是历史回答")}},
 	}}
-	server.saveTranscript(managed)
+	header, msgs := transcriptHeader(managed.meta), managed.agentCtx.Messages
 	managed.mu.Unlock()
+	server.checkpoint(managed, header, msgs, 0)
 
 	otherRequest := requestWithPrincipal(httptest.NewRequest(http.MethodGet, "/api/sessions/"+created.ID, nil), requestPrincipal{UserID: "user-b"})
 	otherRequest.SetPathValue("id", created.ID)

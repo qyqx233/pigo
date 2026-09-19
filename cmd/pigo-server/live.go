@@ -340,7 +340,7 @@ func (s *apiServer) reapIdle() {
 			continue
 		}
 		idle := s.config.idleTimeout > 0 && now.Sub(m.meta.LastUsed) >= s.config.idleTimeout
-		if idle && !m.busy && m.liveAlive() {
+		if idle && m.activeTurn() == nil && m.liveAlive() {
 			m.stopLive()
 		}
 		id := m.meta.ID

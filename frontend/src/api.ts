@@ -20,6 +20,52 @@ export type SessionInfo = {
   pigoSessionId?: string;
   sandbox?: string;
   alive?: boolean;
+  // turn is the running (or just-finished) turn; lastTurn how the last one
+  // ended, kept across restarts.
+  turn?: TurnInfo;
+  lastTurn?: TurnInfo;
+};
+
+// TurnInfo describes one turn: a user message and everything the agent did
+// about it. A turn runs on the server independently of the page.
+export type TurnInfo = {
+  id: string;
+  startedAt: string;
+  endedAt?: string;
+  status: "running" | "done" | "stopped" | "error";
+  // Why it ended: "done", "step_limit", "stalled", "time_limit", "canceled",
+  // "shutdown", "interrupted", "session_closed" or "error".
+  reason?: string;
+  steps: number;
+  message?: string;
+};
+
+// TurnStatus is what a running turn is doing, from its heartbeat and tool
+// events. since is a local timestamp (ms) the phase began.
+export type TurnStatus = { phase: "tool" | "model"; tool?: string; since: number; steps: number };
+
+// TurnEnd is how a turn the page watched ended.
+export type TurnEnd = { reason: string; steps: number; message?: string };
+
+// The reasons after which "继续" makes sense: the work was cut short, not done.
+export const continuableReasons = new Set(["step_limit", "stalled", "time_limit", "canceled", "shutdown", "interrupted"]);
+
+// TurnError is a turn that ended without finishing; its message is the
+// server's explanation.
+export class TurnError extends Error {
+  constructor(message: string, readonly end: TurnEnd) {
+    super(message);
+  }
+}
+
+// TurnHandlers receive what a turn stream carries besides the reply text.
+export type TurnHandlers = {
+  // onNotice: transient status to show (a retry, a reconnect); "" clears it.
+  onNotice?: (text: string) => void;
+  // onUsage: every model call of the turn so far (the full list each time).
+  onUsage?: (calls: CallUsage[]) => void;
+  onStatus?: (status: TurnStatus | null) => void;
+  onEnd?: (end: TurnEnd) => void;
 };
 
 export type HistoryMessage = {
@@ -210,18 +256,25 @@ export type SessionSettings = {
 };
 
 type StreamEvent = {
-  // "notice" carries transient run status (currently only a retry after a
-  // rate-limited or overloaded request): no conversation content, safe to
-  // ignore, and worth surfacing because the run pauses for several seconds.
-  // "usage" reports one model call's tokens and cost as the call finishes; a
-  // turn with tool use or compaction sends several.
-  type: "delta" | "done" | "error" | "tool" | "notice" | "usage";
+  // "snapshot" opens every turn stream: the turn so far (text, calls, steps),
+  //   so attaching mid-turn loses nothing.
+  // "notice" carries transient run status (a retry after a rate-limited or
+  //   overloaded request): no conversation content.
+  // "usage" reports one model call's tokens and cost as the call finishes.
+  // "heartbeat" says what the turn is doing while nothing else happens.
+  // "done" / "error" end the turn, with the reason.
+  type: "snapshot" | "delta" | "done" | "error" | "tool" | "notice" | "usage" | "heartbeat";
   usage?: CallUsage;
+  usages?: CallUsage[];
   text?: string;
   error?: string;
   tool?: string;
   notice?: string;
   phase?: string;
+  steps?: number;
+  elapsedMs?: number;
+  reason?: string;
+  detail?: string;
 };
 
 const serverTokenStorageKey = "pigo.serverToken";
@@ -555,64 +608,163 @@ export class PigoAPI {
     saveBlob(await response.blob(), path.split("/").pop() || "file");
   }
 
-  // onNotice receives transient run status (a retry after a rate-limited or
-  // overloaded request). It is a callback rather than a yielded value because a
-  // notice is not part of the reply: the run pauses for seconds, and the UI
-  // needs to say so without writing anything into the assistant's message.
+  // stream starts a turn for prompt and yields the reply text as it grows.
   //
-  // onUsage receives each model call's usage as it finishes, for the same
-  // reason: it describes the reply rather than being part of it.
-  async *stream(
-    prompt: string,
-    signal: AbortSignal,
-    onNotice?: (text: string) => void,
-    onUsage?: (usage: CallUsage) => void,
-  ): AsyncGenerator<string> {
+  // The turn runs on the server: if the connection drops, this reattaches and
+  // carries on; aborting signal only stops watching (use cancelTurn to stop
+  // the turn itself).
+  stream(prompt: string, signal: AbortSignal, handlers: TurnHandlers = {}): AsyncGenerator<string> {
     const session = this.requireSession();
-    const response = await fetch(
-      `/api/sessions/${encodeURIComponent(session.id)}/messages?stream=true`,
-      {
-        method: "POST",
-        headers: this.headers(true),
-        body: JSON.stringify({ prompt }),
-        signal,
-        credentials: "same-origin",
-      },
+    return this.follow(
+      session,
+      () =>
+        fetch(`/api/sessions/${encodeURIComponent(session.id)}/messages?stream=true`, {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({ prompt }),
+          signal,
+          credentials: "same-origin",
+        }),
+      signal,
+      handlers,
     );
-    if (!response.ok) throw new APIError(await errorMessage(response), response.status);
-    if (!response.body) throw new Error("当前浏览器不支持流式响应");
+  }
 
+  // attach follows the session's running turn, starting from its snapshot.
+  attach(signal: AbortSignal, handlers: TurnHandlers = {}): AsyncGenerator<string> {
+    const session = this.requireSession();
+    return this.follow(session, () => this.attachRequest(session, signal), signal, handlers);
+  }
+
+  async cancelTurn(): Promise<void> {
+    const session = this.requireSession();
+    await this.request<unknown>(`/api/sessions/${encodeURIComponent(session.id)}/turn/cancel`, {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  private attachRequest(session: SessionInfo, signal: AbortSignal): Promise<Response> {
+    return fetch(`/api/sessions/${encodeURIComponent(session.id)}/turn`, {
+      headers: this.headers(),
+      signal,
+      credentials: "same-origin",
+    });
+  }
+
+  // follow reads a turn stream to its end, reattaching when the connection
+  // drops before it (a network blip, a proxy timeout, a suspended laptop).
+  private async *follow(
+    session: SessionInfo,
+    open: () => Promise<Response>,
+    signal: AbortSignal,
+    handlers: TurnHandlers,
+  ): AsyncGenerator<string> {
+    let response = await open();
+    if (!response.ok) throw new APIError(await errorMessage(response), response.status);
+    for (let attempt = 0; ; ) {
+      const ended = yield* this.readTurn(response, signal, handlers);
+      if (ended || signal.aborted) return;
+      // Dropped mid-turn. The turn is still running on the server.
+      handlers.onNotice?.("连接中断，正在重连…");
+      for (;;) {
+        attempt++;
+        if (attempt > 40) throw new Error("连接中断，多次重连失败。刷新页面可以重新接上仍在运行的任务。");
+        await sleep(Math.min(500 * 2 ** attempt, 5000), signal);
+        if (signal.aborted) return;
+        try {
+          response = await this.attachRequest(session, signal);
+        } catch {
+          continue;
+        }
+        if (response.status === 404) throw new Error("连接中断期间本轮已结束，刷新页面查看结果。");
+        if (response.ok) break;
+      }
+      handlers.onNotice?.("");
+      attempt = 0;
+    }
+  }
+
+  // readTurn reads one connection's worth of a turn stream. It returns true when
+  // the turn's end arrived, false when the connection ended first.
+  private async *readTurn(response: Response, signal: AbortSignal, handlers: TurnHandlers): AsyncGenerator<string, boolean> {
+    if (!response.body) throw new Error("当前浏览器不支持流式响应");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let pending = "";
-    let accumulated = "";
+    let text = "";
+    let calls: CallUsage[] = [];
     for (;;) {
-      const chunk = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (cause) {
+        if (signal.aborted) return false;
+        // A network error mid-stream is a dropped connection, not a failure.
+        void cause;
+        return false;
+      }
       pending += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
       const lines = pending.split("\n");
       pending = lines.pop() ?? "";
       for (const line of lines) {
         if (!line.trim()) continue;
         const event = JSON.parse(line) as StreamEvent;
-        if (event.type === "error") throw new Error(event.error || "请求失败");
-        if (event.type === "notice") onNotice?.(event.text ?? "");
-        if (event.type === "usage" && event.usage) onUsage?.(event.usage);
-        if (event.type === "delta") {
-          // Output is flowing again, so any pending notice is over. Sent on
-          // every delta (not just the first) because one run streams several
-          // turns and a retry can follow text that already arrived; React bails
-          // out when the value is unchanged.
-          onNotice?.("");
-          accumulated += event.text ?? "";
-          yield accumulated;
-        }
-        if (event.type === "done") {
-          onNotice?.("");
-          accumulated = event.text ?? accumulated;
-          yield accumulated;
+        switch (event.type) {
+          case "snapshot":
+            text = event.text ?? "";
+            calls = event.usages ?? [];
+            handlers.onUsage?.([...calls]);
+            if (text) yield text;
+            break;
+          case "delta":
+            // Output is flowing, so any pending notice is over.
+            handlers.onNotice?.("");
+            text += event.text ?? "";
+            yield text;
+            break;
+          case "usage":
+            if (event.usage) {
+              calls = [...calls, event.usage];
+              handlers.onUsage?.(calls);
+            }
+            break;
+          case "notice":
+            handlers.onNotice?.(event.text ?? "");
+            break;
+          case "tool":
+            handlers.onStatus?.(
+              event.phase === "start"
+                ? { phase: "tool", tool: event.tool, since: Date.now(), steps: event.steps ?? 0 }
+                : { phase: "model", since: Date.now(), steps: event.steps ?? 0 },
+            );
+            break;
+          case "heartbeat":
+            handlers.onStatus?.({
+              phase: event.phase === "tool" ? "tool" : "model",
+              tool: event.tool,
+              since: Date.now() - (event.elapsedMs ?? 0),
+              steps: event.steps ?? 0,
+            });
+            break;
+          case "done": {
+            handlers.onNotice?.("");
+            handlers.onStatus?.(null);
+            const end = { reason: event.reason ?? "done", steps: event.steps ?? 0, message: event.detail };
+            handlers.onEnd?.(end);
+            yield event.text ?? text;
+            return true;
+          }
+          case "error": {
+            handlers.onNotice?.("");
+            handlers.onStatus?.(null);
+            const end = { reason: event.reason ?? "error", steps: event.steps ?? 0, message: event.error };
+            handlers.onEnd?.(end);
+            throw new TurnError(event.error || "请求失败", end);
+          }
         }
       }
-      if (chunk.done) break;
+      if (chunk.done) return false;
     }
   }
 
@@ -643,6 +795,16 @@ export class PigoAPI {
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;
   }
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
 
 function saveBlob(blob: Blob, name: string) {

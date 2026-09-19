@@ -41,6 +41,11 @@ type sessionMeta struct {
 	Tools         []string  `json:"tools"`
 	CreatedAt     time.Time `json:"createdAt"`
 	LastUsed      time.Time `json:"lastUsed"`
+	// ActiveTurn is set while a turn runs and cleared when it ends; one found
+	// at startup is a turn the previous process never finished.
+	ActiveTurn *turnRecord `json:"activeTurn,omitempty"`
+	// LastTurn is how the most recent turn ended.
+	LastTurn *turnRecord `json:"lastTurn,omitempty"`
 }
 
 func (p sessionPaths) create() error {
@@ -69,6 +74,9 @@ func loadSessions(dataDir string) map[string]*managedSession {
 			continue
 		}
 		_ = os.MkdirAll(paths.Run, 0o700)
+		if recoverInterruptedTurn(&meta) {
+			_ = paths.saveMeta(meta)
+		}
 		out[meta.ID] = &managedSession{paths: paths, meta: meta}
 	}
 	return out
@@ -112,4 +120,26 @@ func defaultDataDir() string {
 		return ".pigo-server"
 	}
 	return filepath.Join(home, ".pigo-server")
+}
+
+// recoverInterruptedTurn turns a turn left running by a previous process into
+// its record as interrupted. The steps it completed are in the transcript,
+// which it saved after each one.
+func recoverInterruptedTurn(meta *sessionMeta) bool {
+	active := meta.ActiveTurn
+	if active == nil {
+		return false
+	}
+	now := time.Now().UTC()
+	meta.LastTurn = &turnRecord{
+		ID:        active.ID,
+		StartedAt: active.StartedAt,
+		EndedAt:   &now,
+		Status:    "stopped",
+		Reason:    turnInterrupted,
+		Steps:     active.Steps,
+		Message:   turnMessage(turnInterrupted, active.Steps, turnLimits{}),
+	}
+	meta.ActiveTurn = nil
+	return true
 }

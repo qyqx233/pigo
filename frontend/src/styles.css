@@ -3056,3 +3056,31 @@ button {
 [data-theme="light"] .price-form {
   border-color: #d3dad0;
 }
+
+/* --- turn endings ------------------------------------------------------------ */
+
+.turn-note {
+  margin: 10px 0 0;
+  color: #d3b98a;
+  font-size: 12.5px;
+}
+
+.continue-button {
+  margin-top: 8px;
+}
+
+.last-turn-banner {
+  gap: 10px;
+}
+
+.last-turn-banner span {
+  flex: 1 1 auto;
+}
+
+.last-turn-banner .ghost-button {
+  flex: 0 0 auto;
+}
+
+[data-theme="light"] .turn-note {
+  color: #8a6420;
+}

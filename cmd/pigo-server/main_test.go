@@ -113,11 +113,11 @@ func TestHandleMessageStreamsHostLoopStub(t *testing.T) {
 func TestHandleMessageSandboxUnavailable(t *testing.T) {
 	server := &apiServer{
 		config: serverConfig{
-			requestLimit: time.Minute,
-			dataDir:      t.TempDir(),
-			thinking:     "medium",
-			model:        "openrouter/free",
-			maxSessions:  8,
+			turnMax:     time.Minute,
+			dataDir:     t.TempDir(),
+			thinking:    "medium",
+			model:       "openrouter/free",
+			maxSessions: 8,
 		},
 		sandbox:  Sandbox{Bwrap: filepath.Join(t.TempDir(), "missing"), Pigo: filepath.Join(t.TempDir(), "missing")},
 		sessions: map[string]*managedSession{},
@@ -370,11 +370,11 @@ func newTestServer(t *testing.T) *apiServer {
 		t.Fatal(err)
 	}
 	cfg := serverConfig{
-		dataDir:      data,
-		model:        "openrouter/free",
-		thinking:     "medium",
-		maxSessions:  8,
-		requestLimit: time.Minute,
+		dataDir:     data,
+		model:       "openrouter/free",
+		thinking:    "medium",
+		maxSessions: 8,
+		turnMax:     time.Minute,
 	}
 	// The credential store is enabled in tests so handlers exercise the real
 	// encrypt/decrypt path rather than the disabled fallback.

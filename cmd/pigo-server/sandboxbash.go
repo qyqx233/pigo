@@ -68,11 +68,22 @@ func (t *sandboxBashTool) Execute(ctx context.Context, id string, args json.RawM
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// The session lock guards the sandbox pointer, not the command: it is held
+	// to find (or start) the sandbox and released before the command runs, so
+	// the session stays responsive during a long command.
+	t.session.mu.Lock()
+	if t.session.closed {
+		t.session.mu.Unlock()
+		return textResult("bash: session closed"), fmt.Errorf("bash: session closed")
+	}
 	spec := t.server.sandboxSpec(t.session)
 	if err := t.server.ensureLive(t.session, spec); err != nil {
+		t.session.mu.Unlock()
 		return textResult("bash: sandbox unavailable"), err
 	}
-	res, err := runLiveJob(runCtx, t.session.live, a.Command)
+	live := t.session.live
+	t.session.mu.Unlock()
+	res, err := runLiveJob(runCtx, live, a.Command)
 	out := strings.TrimRight(res.Stdout+res.Stderr, "\n")
 	if len(out) > 30_000 {
 		out = out[:12_000] + "\n[truncated]\n" + out[len(out)-12_000:]
@@ -80,8 +91,13 @@ func (t *sandboxBashTool) Execute(ctx context.Context, id string, args json.RawM
 	if onUpdate != nil {
 		onUpdate(textResult(out))
 	}
+	// Tell apart the command's own timeout from the turn being stopped around
+	// it: runCtx is derived from the turn's context, so both end it.
+	if reason := stopReason(ctx); reason != "" {
+		return textResult(out), fmt.Errorf("bash: the turn was stopped (%s); the command was terminated\n%s", reason, out)
+	}
 	if runCtx.Err() == context.DeadlineExceeded {
-		return textResult(out), fmt.Errorf("bash: command timed out after %s\n%s", timeout, out)
+		return textResult(out), fmt.Errorf("bash: command timed out after %s (its own timeout)\n%s", timeout, out)
 	}
 	if err != nil {
 		return textResult(out), fmt.Errorf("bash: %v\n%s", err, out)

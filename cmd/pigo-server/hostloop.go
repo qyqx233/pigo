@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,21 +105,45 @@ func hasHostRead(tools []agentcore.AgentTool) bool {
 	return false
 }
 
+// runHostLoop runs one turn of the agent. It holds the session lock only to set
+// up: from then on the turn owns the agent context (no other path touches it
+// while a turn runs) and works on its own copy of the run configuration, so a
+// settings change made meanwhile applies to the next turn.
+//
+// The transcript is saved when the user's message is added and again after
+// every step (see turnRun.installHooks), so a restart loses at most the step
+// in progress.
 func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, prompt string, emit func(streamEvent)) (string, error) {
+	managed.mu.Lock()
 	if err := s.ensureHostLoop(managed); err != nil {
+		managed.mu.Unlock()
 		return "", err
 	}
-	managed.agentCtx.Messages = append(managed.agentCtx.Messages, agentcore.UserMessage{
+	agentCtx := managed.agentCtx
+	agentCtx.Messages = append(agentCtx.Messages, agentcore.UserMessage{
 		RoleField: agentcore.RoleUser,
 		Content:   agentcore.ContentList{agentcore.NewTextContent(prompt)},
 	})
+	cfg := managed.runCfg
+	header := transcriptHeader(managed.meta)
 	// Every model call the turn makes is metered under this turn, and the turn
 	// does not report itself finished until each call's cost is recorded — so
 	// the client sees the last "usage" event before "done".
 	turn := s.newTurn(managed, emit)
+	managed.mu.Unlock()
+
+	run := runFrom(ctx)
+	if run != nil {
+		run.setTranscriptStart(len(agentCtx.Messages) - 1)
+		run.installHooks(&cfg, func(ac *agentcore.AgentContext) {
+			s.checkpoint(managed, header, ac.Messages, run.stepCount())
+		})
+	}
+	s.checkpoint(managed, header, agentCtx.Messages, 0)
+
 	ctx = withTurn(ctx, turn)
 	defer turn.wait(10 * time.Second)
-	stream := runtime.StartRun(ctx, managed.agentCtx, managed.runCfg)
+	stream := runtime.StartRun(ctx, agentCtx, cfg)
 	final, err := runtime.DrainStream(ctx, stream, runtime.StreamHandler{
 		OnText: func(delta string) {
 			if emit != nil {
@@ -126,6 +151,9 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 			}
 		},
 		OnEvent: func(ev agentcore.AgentEvent) {
+			if run != nil {
+				run.observe(ev)
+			}
 			if emit == nil {
 				return
 			}
@@ -144,7 +172,11 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 			}
 		},
 	})
-	s.saveTranscript(managed)
+	steps := 0
+	if run != nil {
+		steps = run.stepCount()
+	}
+	s.checkpoint(managed, header, agentCtx.Messages, steps)
 	if err != nil {
 		return "", err
 	}
@@ -181,22 +213,41 @@ func (s *apiServer) loadTranscript(managed *managedSession) agentcore.MessageLis
 	return msgs
 }
 
-func (s *apiServer) saveTranscript(managed *managedSession) {
-	if managed.agentCtx == nil {
+// transcriptHeader is the transcript's header for a session's current meta.
+func transcriptHeader(meta sessionMeta) session.SessionHeader {
+	return session.SessionHeader{
+		ID:        transcriptID,
+		CreatedAt: meta.CreatedAt,
+		Model:     meta.Model,
+		Provider:  meta.Provider,
+		Cwd:       virtualWorkspaceRoot,
+	}
+}
+
+// checkpoint saves the transcript during a turn, and the turn's step count
+// with it. It is called from the agent loop's goroutine while the message list
+// is stable. A closed session is not written: it is being deleted.
+func (s *apiServer) checkpoint(managed *managedSession, header session.SessionHeader, msgs agentcore.MessageList, steps int) {
+	managed.mu.Lock()
+	if managed.closed {
+		managed.mu.Unlock()
 		return
 	}
-	store, err := session.NewStore(filepath.Join(managed.paths.Root, "transcript"))
+	if active := managed.meta.ActiveTurn; active != nil && steps > active.Steps {
+		active.Steps = steps
+		_ = managed.paths.saveMeta(managed.meta)
+	}
+	root, id := managed.paths.Root, managed.meta.ID
+	managed.mu.Unlock()
+
+	store, err := session.NewStore(filepath.Join(root, "transcript"))
 	if err != nil {
 		return
 	}
-	_ = store.Save(session.SessionHeader{
-		ID:        transcriptID,
-		CreatedAt: managed.meta.CreatedAt,
-		UpdatedAt: time.Now().UTC(),
-		Model:     managed.meta.Model,
-		Provider:  managed.meta.Provider,
-		Cwd:       virtualWorkspaceRoot,
-	}, managed.agentCtx.Messages)
+	header.UpdatedAt = time.Now().UTC()
+	if err := store.Save(header, msgs); err != nil {
+		log.Printf("pigo-server: session %s: save transcript: %v", shortID(id), err)
+	}
 }
 
 func (s *apiServer) applyHostConfig(managed *managedSession) error {
@@ -222,12 +273,15 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 }
 
 // meterStreams points the session's model calls at the provider through the
-// billing meter: the conversation's calls, and the summary calls that compact a
+// billing meter and the stall guard: the conversation's calls, and the summary calls that compact a
 // long context (which otherwise fall back to the same unmetered stream).
 func (s *apiServer) meterStreams(managed *managedSession, prov provider.Provider, providerName string) {
+	// The stall guard is outermost, so when it abandons a call the meter
+	// still records it (as aborted) on the way out.
 	stream := provider.StreamFnFromProvider(prov)
-	managed.runCfg.Stream = s.meter.wrap(stream, providerName, "chat")
-	managed.runCfg.SummaryStream = s.meter.wrap(stream, providerName, "compaction")
+	idle := streamIdleTimeout()
+	managed.runCfg.Stream = guardStream(s.meter.wrap(stream, providerName, "chat"), idle)
+	managed.runCfg.SummaryStream = guardStream(s.meter.wrap(stream, providerName, "compaction"), idle)
 }
 
 // newTurn describes one user turn for the billing meter.

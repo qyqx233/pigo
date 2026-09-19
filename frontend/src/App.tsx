@@ -33,7 +33,13 @@ import {
 import {
   APIError,
   PigoAPI,
+  continuableReasons,
+  TurnError,
   type CallUsage,
+  type TurnEnd,
+  type TurnHandlers,
+  type TurnInfo,
+  type TurnStatus,
   type TurnUsage,
   type UsageTotals,
   type HistoryMessage,
@@ -61,9 +67,15 @@ type PigoContextValue = {
   // model call reports its cost.
   sessionCost: UsageTotals | null;
   error: string;
-  // notice is transient run status (currently a retry after a rate-limited or
-  // overloaded request). Empty when there is nothing to say.
+  // notice is transient run status (a retry after a rate-limited or
+  // overloaded request, a reconnect). Empty when there is nothing to say.
   notice: string;
+  // runStatus is what the running turn is doing (from its heartbeat).
+  runStatus: TurnStatus | null;
+  // lastTurn is how the open session's previous turn ended, when it did not
+  // simply finish and the page did not watch it end (a reload, a restart).
+  lastTurn: TurnInfo | null;
+  dismissLastTurn(): void;
   theme: Theme;
   setTheme(theme: Theme): void;
   commandBrowserOpen: boolean;
@@ -123,6 +135,8 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
   const [modelsError, setModelsError] = useState("");
   const [error, setError] = useState("");
   const [runNotice, setRunNotice] = useState("");
+  const [runStatus, setRunStatus] = useState<TurnStatus | null>(null);
+  const [lastTurn, setLastTurn] = useState<TurnInfo | null>(null);
   const [sessionCost, setSessionCost] = useState<UsageTotals | null>(null);
   const [commandBrowserOpen, setCommandBrowserOpen] = useState(false);
   const [theme, setThemeState] = useState<Theme>(() => {
@@ -146,57 +160,82 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // followTurn turns a turn stream into assistant-ui run results: the reply
+  // text, and as metadata the turn's usage and, once it ends, how it ended.
+  // It serves both a new message and reattaching to a turn already running.
+  //
+  // fresh is false when reattaching: the session total loaded from the server
+  // already includes the calls in the snapshot, so only later ones are added.
+  async function* followTurn(open: (handlers: TurnHandlers) => AsyncGenerator<string>, signal: AbortSignal, fresh: boolean) {
+    setError("");
+    setRunNotice("");
+    setLastTurn(null);
+    let calls: CallUsage[] = [];
+    let counted = fresh ? 0 : -1;
+    let end: TurnEnd | null = null;
+    const handlers: TurnHandlers = {
+      onNotice: setRunNotice,
+      onStatus: setRunStatus,
+      onUsage(list) {
+        if (counted < 0) counted = list.length;
+        for (const call of list.slice(counted)) setSessionCost((current) => addCall(current, call));
+        counted = Math.max(counted, list.length);
+        calls = list;
+      },
+      onEnd(next) {
+        end = next;
+      },
+    };
+    const shape = (text: string) => ({
+      content: [{ type: "text" as const, text }],
+      metadata: { custom: { ...(calls.length > 0 ? { usage: totalsOf(calls) } : {}), ...(end ? { end } : {}) } },
+    });
+    let last = "";
+    try {
+      for await (const text of open(handlers)) {
+        last = text;
+        yield shape(text);
+      }
+      // Once more, so usage and the ending that arrived with the final text
+      // are on the message.
+      yield shape(last);
+    } catch (cause) {
+      if (end) yield shape(last);
+      // A turn that ended short (stopped, a limit, an upstream error) says so
+      // on its message; the top bar's error is for the connection itself.
+      if (!(cause instanceof TurnError)) setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
+    } finally {
+      setRunNotice("");
+      setRunStatus(null);
+    }
+    // Watching was abandoned (another session was opened): the turn goes on,
+    // and there is nothing of this session to refresh.
+    if (signal.aborted) return;
+    void Promise.all([api.sessionInfo(), api.commands(), api.sessions()])
+      .then(([nextSession, nextCommands, nextSessions]) => {
+        setSession(nextSession);
+        setCommands(nextCommands);
+        setSessions(nextSessions);
+        // The ledger's figure replaces the live sum, which cannot see
+        // calls from another tab.
+        return api.sessionUsage(nextSession.id).then(setSessionCost);
+      })
+      .catch(() => undefined);
+  }
+
   const adapter = useMemo<ChatModelAdapter>(
     () => ({
       async *run({ messages, abortSignal }) {
-        setError("");
-        setRunNotice("");
-        try {
-          const prompt = textOf(messages.at(-1)!);
-          if (prompt.trim() === "/help") {
-            setCommandBrowserOpen(true);
-            yield {
-              content: [{ type: "text", text: "已打开命令浏览器，可搜索或选择命令。" }],
-            };
-            return;
-          }
-          // Each model call of the turn reports its cost as it finishes. They
-          // are summed onto the reply (and the session total) as they arrive,
-          // so the figure is live rather than appearing when the turn ends.
-          const calls: CallUsage[] = [];
-          const onUsage = (call: CallUsage) => {
-            calls.push(call);
-            setSessionCost((current) => addCall(current, call));
+        const prompt = textOf(messages.at(-1)!);
+        if (prompt.trim() === "/help") {
+          setCommandBrowserOpen(true);
+          yield {
+            content: [{ type: "text", text: "已打开命令浏览器，可搜索或选择命令。" }],
           };
-          const withUsage = (text: string) => ({
-            content: [{ type: "text" as const, text }],
-            ...(calls.length > 0 ? { metadata: { custom: { usage: totalsOf([...calls]) } } } : {}),
-          });
-          let emitted = false;
-          let last = "";
-          for await (const text of api.stream(prompt, abortSignal, setRunNotice, onUsage)) {
-            emitted = true;
-            last = text;
-            yield withUsage(text);
-          }
-          if (!emitted || calls.length > 0) yield withUsage(last);
-        } catch (cause) {
-          setError(cause instanceof Error ? cause.message : String(cause));
-          throw cause;
-        } finally {
-          // The wait is over whether the run succeeded, failed or was aborted.
-          setRunNotice("");
+          return;
         }
-        void Promise.all([api.sessionInfo(), api.commands(), api.sessions()])
-          .then(([nextSession, nextCommands, nextSessions]) => {
-            setSession(nextSession);
-            setCommands(nextCommands);
-            setSessions(nextSessions);
-            // The ledger's figure replaces the live sum, which cannot see
-            // calls from another tab.
-            return api.sessionUsage(nextSession.id).then(setSessionCost);
-          })
-          .catch(() => undefined);
+        yield* followTurn((handlers) => api.stream(prompt, abortSignal, handlers), abortSignal, true);
       },
     }),
     [api],
@@ -220,8 +259,22 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     } catch {
       // The selected session still works for this page lifetime.
     }
+    // Stop watching whatever turn the page was following; on the server it
+    // carries on.
+    runtime.thread.cancelRun();
     const history = await api.history(next.id);
-    runtime.thread.reset(toThreadMessages(history));
+    const threadMessages = toThreadMessages(history);
+    runtime.thread.reset(threadMessages);
+    const running = next.turn?.status === "running";
+    if (running) {
+      // A turn is still running (the page was reloaded, or opened elsewhere):
+      // follow it from its snapshot, under the user message that started it.
+      runtime.thread.resumeRun({
+        parentId: threadMessages.at(-1)?.id ?? null,
+        stream: ({ abortSignal }) => followTurn((handlers) => api.attach(abortSignal, handlers), abortSignal, false),
+      });
+    }
+    setLastTurn(!running && next.lastTurn && next.lastTurn.reason !== "done" ? next.lastTurn : null);
     setSessionCost(null);
     void api.sessionUsage(next.id).then(setSessionCost).catch(() => undefined);
     try {
@@ -311,6 +364,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     setModels([]);
     setModelsError("");
     setSessionCost(null);
+    setLastTurn(null);
     setError("");
   }
 
@@ -395,6 +449,9 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
         sessionCost,
         error,
         notice: runNotice,
+        runStatus,
+        lastTurn,
+        dismissLastTurn: () => setLastTurn(null),
         theme,
         setTheme,
         commandBrowserOpen,
@@ -1335,6 +1392,7 @@ function Thread() {
           components={{ UserMessage, AssistantMessage }}
         />
         <ThreadPrimitive.ViewportFooter className="composer-footer">
+          <LastTurnBanner />
           <RunNotice />
           <Composer />
         </ThreadPrimitive.ViewportFooter>
@@ -1343,16 +1401,77 @@ function Thread() {
   );
 }
 
-// RunNotice shows transient run status above the composer — today only the
-// retry backoff, where the run pauses for seconds after a rate-limited or
-// overloaded request and a silent UI would look hung.
+// RunNotice shows run status above the composer: a transient notice (a retry
+// backoff, a reconnect) when there is one, otherwise what the running turn is
+// doing once it has been at it for a while — a long command or a slow model
+// looks hung without it.
 function RunNotice() {
-  const { notice } = usePigo();
-  if (!notice) return null;
+  const { notice, runStatus } = usePigo();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!runStatus) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [runStatus]);
+
+  let text = notice;
+  if (!text && runStatus) {
+    const elapsed = now - runStatus.since;
+    if (elapsed >= 5000) {
+      const doing = runStatus.phase === "tool" ? `正在执行 ${runStatus.tool ?? "工具"}` : "等待模型响应";
+      text = `${doing}（已 ${formatElapsed(elapsed)}）${runStatus.steps > 0 ? ` · 已完成 ${runStatus.steps} 步` : ""}`;
+    }
+  }
+  if (!text) return null;
   return (
     <div className="run-notice" role="status">
       <span className="run-notice-dot" aria-hidden="true" />
-      {notice}
+      {text}
+    </div>
+  );
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+}
+
+// sendContinue asks the agent to pick up where a cut-short turn stopped.
+function useSendContinue() {
+  const aui = useAui();
+  return () => {
+    aui.composer.setText("继续");
+    aui.composer.send();
+  };
+}
+
+// LastTurnBanner explains how the session's previous turn ended when the page
+// did not see it end: a turn stopped by a limit or a restart while the page
+// was closed.
+function LastTurnBanner() {
+  const { lastTurn, dismissLastTurn } = usePigo();
+  const sendContinue = useSendContinue();
+  if (!lastTurn) return null;
+  const canContinue = continuableReasons.has(lastTurn.reason ?? "");
+  return (
+    <div className="run-notice last-turn-banner" role="status">
+      <span>{lastTurn.message || "上一轮没有正常结束。"}</span>
+      {canContinue && (
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={() => {
+            dismissLastTurn();
+            sendContinue();
+          }}
+        >
+          继续
+        </button>
+      )}
+      <button type="button" className="ghost-button" aria-label="关闭提示" onClick={dismissLastTurn}>×</button>
     </div>
   );
 }
@@ -1369,7 +1488,15 @@ function UserMessage() {
 
 function AssistantMessage() {
   const { error } = usePigo();
-  const usage = useAuiState((state) => (state.message.metadata?.custom as { usage?: TurnUsage } | undefined)?.usage);
+  const custom = useAuiState((state) => state.message.metadata?.custom as { usage?: TurnUsage; end?: TurnEnd } | undefined);
+  const isLast = useAuiState((state) => state.message.isLast);
+  const running = useAuiState((state) => state.thread.isRunning);
+  const sendContinue = useSendContinue();
+  const usage = custom?.usage;
+  const end = custom?.end;
+  // How the turn ended, when it did not simply finish: a failure shows as the
+  // message's error; a step-limit stop finished normally and says so here.
+  const note = end && end.reason === "step_limit" ? end.message : "";
   return (
     <MessagePrimitive.Root className="message-row assistant-row">
       <div className="assistant-avatar" aria-hidden="true">
@@ -1379,10 +1506,16 @@ function AssistantMessage() {
         <div className="message assistant-message">
           <MessagePrimitive.Content components={{ Text: MarkdownText }} />
           <MessagePrimitive.Error>
-            <span className="message-error">{error || "生成失败，请重试。"}</span>
+            <span className="message-error">{end?.message || error || "生成失败，请重试。"}</span>
           </MessagePrimitive.Error>
+          {note && <p className="turn-note">{note}</p>}
         </div>
         {usage && <UsageLine usage={usage} />}
+        {end && isLast && !running && continuableReasons.has(end.reason) && (
+          <button type="button" className="ghost-button continue-button" onClick={sendContinue}>
+            继续
+          </button>
+        )}
         <ActionBarPrimitive.Root className="message-actions" hideWhenRunning>
           <ActionBarPrimitive.Copy className="message-action">
             复制
@@ -1394,7 +1527,20 @@ function AssistantMessage() {
 }
 
 function Composer() {
-  const { commands } = usePigo();
+  const { api, commands } = usePigo();
+  const [stopping, setStopping] = useState(false);
+  // Stop asks the server to end the turn; the turn's own final event then
+  // ends the run here. Merely closing the stream would leave the turn running.
+  async function stop() {
+    setStopping(true);
+    try {
+      await api.cancelTurn();
+    } catch {
+      // The turn may have just ended on its own.
+    } finally {
+      setStopping(false);
+    }
+  }
   const aui = useAui();
   const slashCommands = useMemo<Unstable_SlashCommand[]>(
     () =>
@@ -1452,9 +1598,9 @@ function Composer() {
         <div className="composer-controls">
           <span>Enter 发送 · Shift+Enter 换行</span>
           <ThreadPrimitive.If running>
-            <ComposerPrimitive.Cancel className="send-button stop-button" aria-label="停止">
+            <button type="button" className="send-button stop-button" aria-label="停止" disabled={stopping} onClick={() => void stop()}>
               ■
-            </ComposerPrimitive.Cancel>
+            </button>
           </ThreadPrimitive.If>
           <ThreadPrimitive.If running={false}>
             <ComposerPrimitive.Send className="send-button" aria-label="发送">

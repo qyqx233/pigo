@@ -76,6 +76,14 @@ func (s *apiServer) handleSessionMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 	entries := s.loadTranscriptEntries(managed)
+	// While a turn runs, what it has produced after the user's message is
+	// served by the turn's snapshot (GET .../turn); showing it here as well
+	// would show it twice.
+	if run := managed.activeTurn(); run != nil {
+		if cut := run.historyCut(); cut >= 0 && cut < len(entries) {
+			entries = entries[:cut]
+		}
+	}
 	messages := historyMessages(managed.meta.ID, entries)
 	attachTurnUsage(messages, responseTurns(entries), s.sessionLedger(managed.meta))
 	writeJSON(w, http.StatusOK, messages)
@@ -234,7 +242,7 @@ func (s *apiServer) removeExpiredEmptySession(id string, managed *managedSession
 		s.mu.Unlock()
 		return
 	}
-	if managed.closed || managed.busy || managed.liveAlive() || now.Sub(managed.meta.LastUsed) < s.config.emptySessionTTL || !sessionHasNoTranscript(managed.paths) || !workspaceIsEmpty(managed.paths) {
+	if managed.closed || managed.activeTurn() != nil || managed.liveAlive() || now.Sub(managed.meta.LastUsed) < s.config.emptySessionTTL || !sessionHasNoTranscript(managed.paths) || !workspaceIsEmpty(managed.paths) {
 		managed.mu.Unlock()
 		s.mu.Unlock()
 		return
