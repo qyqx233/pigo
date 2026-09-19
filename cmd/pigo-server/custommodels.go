@@ -428,6 +428,8 @@ type providerInfoResponse struct {
 	Custom   bool   `json:"custom,omitempty"`
 	Protocol string `json:"protocol,omitempty"`
 	BaseURL  string `json:"baseUrl,omitempty"`
+	// ConversationID mirrors the custom provider's switch (customProvider).
+	ConversationID bool `json:"conversationId,omitempty"`
 }
 
 // credentialSource names the tier that would supply providerName's key for
@@ -478,13 +480,14 @@ func (s *apiServer) handleListProviders(w http.ResponseWriter, r *http.Request) 
 	for _, custom := range s.settings.customProviders() {
 		source := s.credentialSource(userID, custom.Name, false)
 		out = append(out, providerInfoResponse{
-			Name:     custom.Name,
-			HasKey:   source != "none",
-			KeyHint:  provider.APIKeyEnvHint(custom.Name),
-			Source:   source,
-			Custom:   true,
-			Protocol: custom.Protocol,
-			BaseURL:  custom.BaseURL,
+			Name:           custom.Name,
+			HasKey:         source != "none",
+			KeyHint:        provider.APIKeyEnvHint(custom.Name),
+			Source:         source,
+			Custom:         true,
+			Protocol:       custom.Protocol,
+			BaseURL:        custom.BaseURL,
+			ConversationID: custom.ConversationID,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

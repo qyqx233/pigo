@@ -48,7 +48,7 @@ function ProviderRow({
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<CustomProvider>({ name: "", protocol: "openai", baseUrl: "" });
+  const [draft, setDraft] = useState<CustomProvider>({ name: "", protocol: "openai", baseUrl: "", conversationId: false });
   const [userKey, setUserKey] = useState("");
   const [publicKey, setPublicKey] = useState("");
 
@@ -85,7 +85,13 @@ function ProviderRow({
                 id={`edit-protocol-${info.name}`}
                 className="settings-input settings-select"
                 value={draft.protocol}
-                onChange={(event) => setDraft({ ...draft, protocol: event.target.value })}
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    protocol: event.target.value,
+                    conversationId: event.target.value === "openai" && draft.conversationId,
+                  })
+                }
               >
                 <option value="openai">openai（Chat Completions 兼容）</option>
                 <option value="anthropic">anthropic（Messages 兼容）</option>
@@ -97,6 +103,15 @@ function ProviderRow({
                 value={draft.baseUrl}
                 onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
               />
+              <label className="admin-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!draft.conversationId}
+                  disabled={draft.protocol !== "openai"}
+                  onChange={(event) => setDraft({ ...draft, conversationId: event.target.checked })}
+                />
+                <span>请求带会话 ID（conversation_id）· 用于 workbuddy2api 等 CodeBuddy 反代，上游据此复用前缀缓存；仅 openai 协议</span>
+              </label>
               {draft.name.trim().toLowerCase() !== info.name && (
                 <p className="security-note">
                   改名会一并迁移它的 Key、模型、价格和会话；账单记录保留原名。
@@ -112,6 +127,7 @@ function ProviderRow({
                       name: draft.name.trim(),
                       protocol: draft.protocol,
                       baseUrl: draft.baseUrl.trim(),
+                      conversationId: draft.conversationId,
                     }).then((ok) => ok && setEditing(false))
                   }
                 >
@@ -125,12 +141,18 @@ function ProviderRow({
           ) : info.custom ? (
             <p className="provider-endpoint">
               <code>{info.protocol}</code> · <code>{info.baseUrl}</code>
+              {info.conversationId && " · 带会话 ID"}
               {isAdmin && (
                 <button
                   type="button"
                   className="ghost-button"
                   onClick={() => {
-                    setDraft({ name: info.name, protocol: info.protocol ?? "openai", baseUrl: info.baseUrl ?? "" });
+                    setDraft({
+                      name: info.name,
+                      protocol: info.protocol ?? "openai",
+                      baseUrl: info.baseUrl ?? "",
+                      conversationId: !!info.conversationId,
+                    });
                     setEditing(true);
                   }}
                 >
@@ -247,6 +269,7 @@ function AddProvider({
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("openai");
   const [baseUrl, setBaseUrl] = useState("");
+  const [conversationId, setConversationId] = useState(false);
 
   return (
     <div className="provider-add">
@@ -309,7 +332,10 @@ function AddProvider({
             id="custom-protocol"
             className="settings-input settings-select"
             value={protocol}
-            onChange={(event) => setProtocol(event.target.value)}
+            onChange={(event) => {
+              setProtocol(event.target.value);
+              if (event.target.value !== "openai") setConversationId(false);
+            }}
           >
             <option value="openai">openai（Chat Completions 兼容）</option>
             <option value="anthropic">anthropic（Messages 兼容）</option>
@@ -322,14 +348,24 @@ function AddProvider({
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
           />
+          <label className="admin-toggle">
+            <input
+              type="checkbox"
+              checked={conversationId}
+              disabled={protocol !== "openai"}
+              onChange={(event) => setConversationId(event.target.checked)}
+            />
+            <span>请求带会话 ID（conversation_id）· 用于 workbuddy2api 等 CodeBuddy 反代，上游据此复用前缀缓存；仅 openai 协议</span>
+          </label>
           <button
             type="button"
             className="primary-button full-button"
             disabled={!name.trim() || !baseUrl.trim()}
             onClick={() => {
-              onCreate({ name: name.trim(), protocol, baseUrl: baseUrl.trim() });
+              onCreate({ name: name.trim(), protocol, baseUrl: baseUrl.trim(), conversationId });
               setName("");
               setBaseUrl("");
+              setConversationId(false);
             }}
           >
             添加端点

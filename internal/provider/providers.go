@@ -122,6 +122,14 @@ func withOpenRouterUsageAccounting(body []byte) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// ExtraBody is the StreamConfig.Extra key whose value — a map[string]any —
+// holds extra top-level fields for an OpenAI Chat Completions request body,
+// like the OpenAI SDK's extra_body: fields a particular gateway understands
+// (a conversation id, say) that pigo does not model. They only fill fields the
+// encoder did not set, so they can never change the model, the messages or
+// the tools. The Anthropic encoder does not read them.
+const ExtraBody = "body"
+
 // encodeOpenAIRequest serializes a CompletionRequest into an OpenAI Chat
 // Completions JSON body with streaming enabled and usage requested.
 func encodeOpenAIRequest(req CompletionRequest) ([]byte, error) {
@@ -147,6 +155,13 @@ func encodeOpenAIRequest(req CompletionRequest) ([]byte, error) {
 	}
 	if tools := encodeOpenAITools(req.Context.Tools); len(tools) > 0 {
 		body["tools"] = tools
+	}
+	if extra, ok := req.Config.Extra[ExtraBody].(map[string]any); ok {
+		for k, v := range extra {
+			if _, set := body[k]; !set {
+				body[k] = v
+			}
+		}
 	}
 	return json.Marshal(body)
 }

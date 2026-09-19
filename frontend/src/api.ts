@@ -281,9 +281,12 @@ export type ProviderInfo = {
   custom?: boolean;
   protocol?: string;
   baseUrl?: string;
+  conversationId?: boolean;
 };
 
-export type CustomProvider = { name: string; protocol: string; baseUrl: string };
+// conversationId sends the session id as conversation_id in each request, for
+// CodeBuddy gateways (workbuddy2api) whose upstream cache needs it.
+export type CustomProvider = { name: string; protocol: string; baseUrl: string; conversationId?: boolean };
 
 // CredentialInfo never carries the key itself — only a masked hint.
 export type CredentialInfo = { provider: string; configured: boolean; hint?: string };

@@ -283,7 +283,7 @@ func (s *apiServer) meterStreams(managed *managedSession, prov provider.Provider
 	// The stall guard is outermost, so when it abandons a call the meter
 	// still records it (as aborted) on the way out. Tool naming is innermost:
 	// only the provider sees the model-facing names.
-	stream := s.nameStream(provider.StreamFnFromProvider(prov), providerName)
+	stream := s.nameStream(s.conversationStream(provider.StreamFnFromProvider(prov), providerName, managed.meta.ID), providerName)
 	idle := streamIdleTimeout()
 	managed.runCfg.Stream = guardStream(s.meter.wrap(stream, providerName, "chat"), idle)
 	managed.runCfg.SummaryStream = guardStream(s.meter.wrap(stream, providerName, "compaction"), idle)

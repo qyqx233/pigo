@@ -58,6 +58,11 @@ type customProvider struct {
 	Name     string `json:"name"`
 	Protocol string `json:"protocol"`
 	BaseURL  string `json:"baseUrl"`
+	// ConversationID sends the session id as conversation_id in every request
+	// body (conversation_id.go). CodeBuddy gateways such as workbuddy2api use
+	// it to keep a conversation on one upstream cache; without it their prompt
+	// cache almost never hits. OpenAI-protocol endpoints only.
+	ConversationID bool `json:"conversationId,omitempty"`
 }
 
 // customProviderNamePattern keeps a custom name usable as a credential-store
@@ -77,6 +82,10 @@ func (c customProvider) validate() (customProvider, error) {
 	}
 	if c.Protocol != provider.ProtocolOpenAI && c.Protocol != provider.ProtocolAnthropic {
 		return c, errors.New("协议须为 openai 或 anthropic")
+	}
+	if c.ConversationID && c.Protocol != provider.ProtocolOpenAI {
+		// Only the OpenAI request encoder carries extra body fields.
+		return c, errors.New("会话 ID 只支持 openai 协议的端点")
 	}
 	parsed, err := url.Parse(c.BaseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {

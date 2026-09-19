@@ -262,3 +262,43 @@ func TestOpenAIReasoningContentDecoding(t *testing.T) {
 		t.Error("expected at least one StreamThinkingEvent")
 	}
 }
+
+// TestEncodeOpenAIRequestExtraBody covers StreamConfig.Extra[ExtraBody]: its
+// fields are added to the body, but never replace a field the encoder set.
+func TestEncodeOpenAIRequestExtraBody(t *testing.T) {
+	req := CompletionRequest{
+		Model: "m",
+		Context: LlmContext{Messages: agentcore.MessageList{
+			agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent("hi")}},
+		}},
+		Config: StreamConfig{ThinkingLevel: agentcore.ThinkingHigh, Extra: map[string]any{
+			ExtraBody: map[string]any{
+				"conversation_id":  "sess-1",
+				"model":            "other",
+				"reasoning_effort": "low",
+				"stream":           false,
+			},
+		}},
+	}
+	b, err := encodeOpenAIRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeBody(t, b)
+	if m["conversation_id"] != "sess-1" {
+		t.Errorf("conversation_id = %v", m["conversation_id"])
+	}
+	if m["model"] != "m" || m["reasoning_effort"] != "high" || m["stream"] != true {
+		t.Errorf("an extra field replaced one the encoder set: %v", m)
+	}
+
+	// Anything but a map in the slot is ignored.
+	req.Config.Extra = map[string]any{ExtraBody: "conversation_id=x"}
+	b, err = encodeOpenAIRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := decodeBody(t, b)["conversation_id"]; has {
+		t.Error("a non-map ExtraBody was applied")
+	}
+}
