@@ -26,7 +26,7 @@ func TestTranscriptAppends(t *testing.T) {
 	s, managed := transcriptSession(t)
 	path := transcriptPath(managed.paths)
 	msgs := agentcore.MessageList{textMessage(agentcore.RoleUser, "hi"), textMessage(agentcore.RoleAssistant, "hello")}
-	if err := s.saveTranscript(managed, msgs); err != nil {
+	if _, err := s.saveTranscript(managed, msgs); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(path)
@@ -34,7 +34,7 @@ func TestTranscriptAppends(t *testing.T) {
 
 	time.Sleep(2 * time.Millisecond)
 	msgs = append(msgs, textMessage(agentcore.RoleUser, "more"), textMessage(agentcore.RoleAssistant, "sure"))
-	if err := s.saveTranscript(managed, msgs); err != nil {
+	if _, err := s.saveTranscript(managed, msgs); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.ReadFile(path)
@@ -54,7 +54,7 @@ func TestTranscriptAppends(t *testing.T) {
 		t.Errorf("new entry not chained: %+v", entries[2])
 	}
 	// Nothing new: nothing written.
-	if err := s.saveTranscript(managed, msgs); err != nil {
+	if _, err := s.saveTranscript(managed, msgs); err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := os.ReadFile(path); !bytes.Equal(again, after) {
@@ -67,7 +67,7 @@ func TestTranscriptAppends(t *testing.T) {
 	if len(loaded) != 4 || !fresh.transcript.synced {
 		t.Fatalf("loaded %d synced=%v", len(loaded), fresh.transcript.synced)
 	}
-	if err := s.saveTranscript(fresh, append(loaded, textMessage(agentcore.RoleUser, "again"))); err != nil {
+	if _, err := s.saveTranscript(fresh, append(loaded, textMessage(agentcore.RoleUser, "again"))); err != nil {
 		t.Fatal(err)
 	}
 	final, _ := os.ReadFile(path)
@@ -84,12 +84,12 @@ func TestTranscriptAppends(t *testing.T) {
 func TestTranscriptRewrites(t *testing.T) {
 	s, managed := transcriptSession(t)
 	msgs := agentcore.MessageList{textMessage(agentcore.RoleUser, "a"), textMessage(agentcore.RoleAssistant, "b"), textMessage(agentcore.RoleUser, "c")}
-	if err := s.saveTranscript(managed, msgs); err != nil {
+	if _, err := s.saveTranscript(managed, msgs); err != nil {
 		t.Fatal(err)
 	}
 	// Compaction: shorter, with a summary first.
 	compacted := agentcore.MessageList{textMessage(agentcore.RoleUser, "summary"), textMessage(agentcore.RoleUser, "c")}
-	if err := s.saveTranscript(managed, compacted); err != nil {
+	if _, err := s.saveTranscript(managed, compacted); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := readTranscript(managed.paths)
@@ -98,7 +98,7 @@ func TestTranscriptRewrites(t *testing.T) {
 	}
 	// Longer, but the first message is new: also a rewrite, not an append.
 	edited := agentcore.MessageList{textMessage(agentcore.RoleUser, "summary v2"), textMessage(agentcore.RoleUser, "c"), textMessage(agentcore.RoleAssistant, "d")}
-	if err := s.saveTranscript(managed, edited); err != nil {
+	if _, err := s.saveTranscript(managed, edited); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ = readTranscript(managed.paths)
@@ -118,7 +118,7 @@ func TestTranscriptTornTail(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, managed := transcriptSession(t)
 			msgs := agentcore.MessageList{textMessage(agentcore.RoleUser, "hi"), textMessage(agentcore.RoleAssistant, "hello")}
-			if err := s.saveTranscript(managed, msgs); err != nil {
+			if _, err := s.saveTranscript(managed, msgs); err != nil {
 				t.Fatal(err)
 			}
 			f, _ := os.OpenFile(transcriptPath(managed.paths), os.O_APPEND|os.O_WRONLY, 0o600)
@@ -131,7 +131,7 @@ func TestTranscriptTornTail(t *testing.T) {
 				t.Fatalf("loaded %d messages, want the 2 intact ones", len(loaded))
 			}
 			// And the session carries on appending to the repaired file.
-			if err := s.saveTranscript(fresh, append(loaded, textMessage(agentcore.RoleUser, "next"))); err != nil {
+			if _, err := s.saveTranscript(fresh, append(loaded, textMessage(agentcore.RoleUser, "next"))); err != nil {
 				t.Fatal(err)
 			}
 			if entries, err := readTranscript(managed.paths); err != nil || len(entries) != 3 {
@@ -162,7 +162,7 @@ func TestTranscriptUnreadableSetAside(t *testing.T) {
 	if data, _ := os.ReadFile(matches[0]); !strings.Contains(string(data), "not a header") {
 		t.Error("the set-aside file lost its content")
 	}
-	if err := s.saveTranscript(managed, agentcore.MessageList{textMessage(agentcore.RoleUser, "hi")}); err != nil {
+	if _, err := s.saveTranscript(managed, agentcore.MessageList{textMessage(agentcore.RoleUser, "hi")}); err != nil {
 		t.Fatal(err)
 	}
 	if entries, err := readTranscript(managed.paths); err != nil || len(entries) != 1 {

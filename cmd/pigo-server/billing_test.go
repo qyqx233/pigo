@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/compaction"
 	"github.com/smallnest/pigo/internal/provider"
 )
 
@@ -529,8 +528,11 @@ func TestBillingEndToEnd(t *testing.T) {
 		agentcore.UserMessage{RoleField: agentcore.RoleUser, Content: agentcore.ContentList{agentcore.NewTextContent(long)}},
 		agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant, Content: agentcore.ContentList{agentcore.NewTextContent(long)}, StopReason: agentcore.StopReasonEndTurn},
 	}
-	managed.runCfg.ContextWindow = 200
-	managed.runCfg.Compaction = compaction.CompactionSettings{Enabled: true, KeepRecentTokens: 10}
+	// A tiny window for this model (below what the API accepts; the store
+	// takes it) makes every turn compact.
+	if err := server.settings.putModelParam(modelParam{Provider: "fakellm", Model: "fake-model", ContextWindow: 200, CompactPct: 95}); err != nil {
+		t.Fatal(err)
+	}
 
 	body, _ := json.Marshal(messageRequest{Prompt: "hi"})
 	request := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/messages?stream=true", bytes.NewReader(body))
@@ -755,8 +757,24 @@ func TestUsageReports(t *testing.T) {
 	if len(all.Unpriced) != 1 || all.Unpriced[0].Model != "free-1" {
 		t.Errorf("unpriced = %+v", all.Unpriced)
 	}
-	if len(all.Recent) != 3 || all.Recent[0].CostYuan != 0 {
-		t.Errorf("recent = %+v", all.Recent)
+	// The calls, a page at a time, newest first.
+	var page callsPage
+	response = callJSON(t, server.handleAdminCalls, http.MethodGet, "/api/admin/usage/calls?size=2", nil, requestPrincipal{UserID: "a", Admin: true})
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 3 || len(page.Items) != 2 || page.Items[0].At.Before(page.Items[1].At) {
+		t.Errorf("page 1 = %+v", page)
+	}
+	response = callJSON(t, server.handleAdminCalls, http.MethodGet, "/api/admin/usage/calls?size=2&page=2", nil, requestPrincipal{UserID: "a", Admin: true})
+	_ = json.Unmarshal(response.Body.Bytes(), &page)
+	if page.Total != 3 || len(page.Items) != 1 {
+		t.Errorf("page 2 = %+v", page)
+	}
+	response = callJSON(t, server.handleAdminCalls, http.MethodGet, "/api/admin/usage/calls?kind=nothing", nil, requestPrincipal{UserID: "a", Admin: true})
+	_ = json.Unmarshal(response.Body.Bytes(), &page)
+	if page.Total != 0 || page.Items == nil {
+		t.Errorf("filtered to nothing = %+v", page)
 	}
 
 	response = callJSON(t, server.handleAdminUsage, http.MethodGet, "/api/admin/usage?format=csv&user=gone", nil, requestPrincipal{UserID: "a", Admin: true})

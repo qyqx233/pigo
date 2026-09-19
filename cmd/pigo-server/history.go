@@ -30,6 +30,9 @@ type historyMessage struct {
 	// Usage is the turn's model usage and cost, on the turn's last assistant
 	// message (see attachTurnUsage).
 	Usage *turnUsage `json:"usage,omitempty"`
+	// Compaction is a "compaction" message's figures; its Content is the
+	// summary that replaced the earlier conversation.
+	Compaction *compactionReport `json:"compaction,omitempty"`
 
 	// turn numbers the user turns: it goes up with each user message.
 	turn int
@@ -180,6 +183,10 @@ func historyMessages(sessionID string, entries []session.Entry, detail func(name
 					part++
 				}
 			}
+		case agentcore.CompactionMessage:
+			meta := readCompactionMeta(message.Details)
+			result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleCompaction, Content: message.Summary, CreatedAt: entry.Timestamp,
+				Compaction: &compactionReport{Before: message.TokensBefore, After: meta.TokensAfter, Summarized: meta.Summarized}})
 		case agentcore.ToolResultMessage:
 			output := agentcore.ContentToText(message.Content)
 			result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleToolResult, Content: truncateMiddle(output, historyOutputLimit), CreatedAt: entry.Timestamp, ToolName: message.ToolName, ToolCallID: message.ToolCallID, IsError: message.IsError, Summary: toolFailure(output, message.IsError)})

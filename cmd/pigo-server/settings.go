@@ -49,6 +49,13 @@ type serverSettings struct {
 	// the custom providers it is maintained through its own endpoints, not the
 	// settings form.
 	ModelPrices []modelPrice `json:"modelPrices,omitempty"`
+	// DefaultContextWindow and DefaultCompactPct are the deployment's context
+	// window and compaction threshold (a percentage of the window); zero means
+	// the built-in 128k and 80%. ModelParams overrides them per model. Like the
+	// price table they have their own endpoints (context_params.go).
+	DefaultContextWindow int          `json:"defaultContextWindow,omitempty"`
+	DefaultCompactPct    int          `json:"defaultCompactPct,omitempty"`
+	ModelParams          []modelParam `json:"modelParams,omitempty"`
 }
 
 // customProvider is one non-registry endpoint. The API key is not here: it

@@ -149,6 +149,11 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 		Content:   agentcore.ContentList{agentcore.NewTextContent(prompt)},
 	})
 	cfg := managed.runCfg
+	// Context compaction, with the window and threshold that apply now: an
+	// administrator's change takes effect from the next turn.
+	params := s.contextParams(managed.meta.Provider, managed.meta.Model)
+	cfg.ContextWindow = params.Window
+	cfg.Compaction = params.settings()
 	// Every model call the turn makes is metered under this turn, and the turn
 	// does not report itself finished until each call's cost is recorded — so
 	// the client sees the last "usage" event before "done".
@@ -161,16 +166,37 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 
 	run := runFrom(ctx)
 	if run != nil {
-		run.setTranscriptStart(len(agentCtx.Messages) - 1)
 		run.installHooks(&cfg, len(agentCtx.Messages), func(ac *agentcore.AgentContext) {
-			s.checkpoint(managed, ac.Messages)
+			if s.checkpoint(managed, ac.Messages) {
+				run.transcriptRewritten()
+			}
 		})
 	}
-	s.checkpoint(managed, agentCtx.Messages)
+	rewrote := s.checkpoint(managed, agentCtx.Messages)
+	if run != nil {
+		// The user message is now the file's last entry. The file only grows,
+		// so the position holds through a compaction; a rewrite moves it.
+		if rewrote {
+			run.transcriptRewritten()
+		} else if n := s.transcriptLen(managed); n > 0 {
+			run.setTranscriptStart(n - 1)
+		}
+	}
 
 	// started times each tool call, for the activity log. OnEvent runs on
 	// one goroutine, so it needs no lock.
 	started := map[string]time.Time{}
+	// compacting is the automatic compaction under way. The loop reports its
+	// start, but when there is nothing old enough to summarize it returns
+	// without an end; the next event, or the run's end, closes it as skipped.
+	var compacting *compactionReport
+	closeSkipped := func() {
+		if compacting != nil && emit != nil {
+			emit(streamEvent{Type: "compaction", Phase: "end", Compaction: &compactionReport{Reason: compacting.Reason, Before: compacting.Before, After: compacting.Before}})
+		}
+		compacting = nil
+	}
+	defer closeSkipped()
 	ctx = withTurn(ctx, turn)
 	defer func() {
 		turn.wait(10 * time.Second)
@@ -188,6 +214,9 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 		OnEvent: func(ev agentcore.AgentEvent) {
 			if run != nil {
 				run.observe(ev)
+			}
+			if _, ends := ev.(agentcore.CompactionEvent); !ends {
+				closeSkipped()
 			}
 			if emit == nil {
 				return
@@ -209,6 +238,12 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 				}
 				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "end", ID: e.ToolCallID, IsError: e.IsError,
 					Text: toolFailure(resultText(e.Result), e.IsError), ElapsedMs: elapsed})
+			case agentcore.CompactionStartEvent:
+				compacting = &compactionReport{Reason: e.Reason, Before: e.TokensBefore}
+				emit(streamEvent{Type: "compaction", Phase: "start", Compaction: compacting})
+			case agentcore.CompactionEvent:
+				compacting = nil
+				emit(compactionEnd(e))
 			case agentcore.RetryEvent:
 				// Transient status, not content and not a tool: the request is
 				// being re-issued after a rate limit / overload, and the wait is
@@ -249,15 +284,25 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 // no database row: the session's metadata and the turn's usage are committed
 // once, when the turn ends. A closed session is not written: it is being
 // deleted.
-func (s *apiServer) checkpoint(managed *managedSession, msgs agentcore.MessageList) {
+//
+// It reports whether the file was rewritten rather than appended to, which
+// moves every entry's position.
+func (s *apiServer) checkpoint(managed *managedSession, msgs agentcore.MessageList) (rewrote bool) {
 	managed.mu.Lock()
 	defer managed.mu.Unlock()
+	return s.checkpointLocked(managed, msgs)
+}
+
+// checkpointLocked is checkpoint for a caller that holds managed.mu.
+func (s *apiServer) checkpointLocked(managed *managedSession, msgs agentcore.MessageList) (rewrote bool) {
 	if managed.closed {
-		return
+		return false
 	}
-	if err := s.saveTranscript(managed, msgs); err != nil {
+	rewrote, err := s.saveTranscript(managed, msgs)
+	if err != nil {
 		log.Printf("pigo-server: session %s: save transcript: %v", shortID(managed.meta.ID), err)
 	}
+	return rewrote
 }
 
 func (s *apiServer) applyHostConfig(managed *managedSession) error {
@@ -335,7 +380,7 @@ func (s *apiServer) errNoProviderKey(userID, providerName string) error {
 	if s.credentialSource(userID, providerName) != "none" {
 		return nil
 	}
-	return fmt.Errorf("provider %s 没有可用的 API Key：在 设置 → Provider 里填写个人 Key，或请管理员配置公共 Key", providerName)
+	return fmt.Errorf("服务商 %s 没有可用的 API Key：在 设置 → 服务商 里填写个人 Key，或请管理员配置公共 Key", providerName)
 }
 
 // providerResolver maps a model and provider name onto a wire driver. It is

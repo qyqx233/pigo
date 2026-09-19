@@ -11,7 +11,11 @@ import (
 	"strings"
 )
 
-//go:embed dist
+// dist is the Vite build, which is not in git: build the frontend first
+// (see cmd/pigo-server/README.md). "all:" takes in dist/.gitkeep, the one
+// tracked file, so a fresh checkout still compiles — serving no pages.
+//
+//go:embed all:dist
 var assets embed.FS
 
 // Handler returns an SPA-aware static file handler. Real assets are served

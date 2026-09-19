@@ -547,7 +547,7 @@ func (s *apiServer) modelListing(r *http.Request, userID, filter string) string 
 		lines = append(lines, "（OpenRouter 免费目录暂时无法获取："+freeErr.Error()+"）")
 	}
 	if len(models) == 0 {
-		return "没有可用的模型 —— 在 设置 → Provider 配置 Key，或在 设置 → 模型 添加"
+		return "没有可用的模型 —— 在 设置 → 服务商 配置 Key，或在 设置 → 模型 添加"
 	}
 	return strings.Join(lines, "\n") + "\n\n用 /model <id> 切换"
 }

@@ -33,7 +33,7 @@ func TestResolveWebInputAction(t *testing.T) {
 
 func TestResolveWebInputDoesNotSendUnsupportedCommandToModel(t *testing.T) {
 	meta := &sessionMeta{Model: "m", Provider: "p", Thinking: "medium"}
-	prompt, message, complete, err := resolveWebInput(meta, "/compact", builtinResolver, presetListing)
+	prompt, message, complete, err := resolveWebInput(meta, "/fork", builtinResolver, presetListing)
 	if err != nil {
 		t.Fatalf("resolveWebInput: %v", err)
 	}

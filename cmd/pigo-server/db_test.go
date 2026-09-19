@@ -172,7 +172,7 @@ func TestRemoveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	managed := &managedSession{paths: paths, meta: sessionMeta{ID: "s1"}}
-	if err := s.saveTranscript(managed, agentcore.MessageList{textMessage(agentcore.RoleUser, "hi")}); err != nil {
+	if _, err := s.saveTranscript(managed, agentcore.MessageList{textMessage(agentcore.RoleUser, "hi")}); err != nil {
 		t.Fatal(err)
 	}
 	ledger, _ := newLedgerStore(s.db)

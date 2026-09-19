@@ -11,6 +11,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,8 +219,6 @@ type usageReportResponse struct {
 	ByModel  []usageGroup    `json:"byModel"`
 	ByUser   []usageGroup    `json:"byUser,omitempty"`
 	Unpriced []unpricedModel `json:"unpriced"`
-	// Recent is the latest calls, newest first, capped at recentLimit.
-	Recent []usageEntryView `json:"recent"`
 }
 
 // usageEntryView is a ledger entry as a report shows it: cost in yuan.
@@ -227,8 +226,6 @@ type usageEntryView struct {
 	ledgerEntry
 	CostYuan float64 `json:"costYuan"`
 }
-
-const recentLimit = 200
 
 func (s *apiServer) buildReport(entries []ledgerEntry, from, to time.Time, perUser bool) usageReportResponse {
 	var (
@@ -262,7 +259,6 @@ func (s *apiServer) buildReport(entries []ledgerEntry, from, to time.Time, perUs
 		ByDay:    days.byKey(),
 		ByModel:  models.byCost(),
 		Unpriced: []unpricedModel{},
-		Recent:   []usageEntryView{},
 	}
 	if perUser {
 		report.ByUser = users.byCost()
@@ -282,9 +278,6 @@ func (s *apiServer) buildReport(entries []ledgerEntry, from, to time.Time, perUs
 	}
 	for _, key := range unpricedOrder {
 		report.Unpriced = append(report.Unpriced, *unpriced[key])
-	}
-	for i := len(entries) - 1; i >= 0 && len(report.Recent) < recentLimit; i-- {
-		report.Recent = append(report.Recent, usageEntryView{ledgerEntry: entries[i], CostYuan: yuan(entries[i].Cost)})
 	}
 	return report
 }
@@ -326,6 +319,90 @@ func reportQuery(r *http.Request) (ledgerQuery, time.Time, time.Time, error) {
 
 // handleMyUsage reports the caller's own calls. A session filter is honoured
 // only for the caller's own session — the user filter below guarantees that.
+// callsPage is one page of a period's calls, newest first.
+type callsPage struct {
+	Total int              `json:"total"`
+	Page  int              `json:"page"`
+	Size  int              `json:"size"`
+	Items []usageEntryView `json:"items"`
+}
+
+const (
+	defaultCallsPageSize = 50
+	maxCallsPageSize     = 200
+)
+
+// pageCalls filters a period's entries (modelKey is a report's by-model key,
+// provider/model; kind is "chat" or "compaction") and returns one page, newest
+// first. "model" is not used here: reportQuery already reads it, as an exact
+// ledger model.
+func pageCalls(entries []ledgerEntry, values url.Values) callsPage {
+	model := strings.TrimSpace(values.Get("modelKey"))
+	kind := strings.TrimSpace(values.Get("kind"))
+	size, _ := strconv.Atoi(values.Get("size"))
+	if size <= 0 {
+		size = defaultCallsPageSize
+	}
+	if size > maxCallsPageSize {
+		size = maxCallsPageSize
+	}
+	page, _ := strconv.Atoi(values.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	var matched []ledgerEntry
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if model != "" && e.Provider+"/"+entryModel(e) != model {
+			continue
+		}
+		if kind != "" && e.Kind != kind {
+			continue
+		}
+		matched = append(matched, e)
+	}
+	out := callsPage{Total: len(matched), Page: page, Size: size, Items: []usageEntryView{}}
+	for i := (page - 1) * size; i < len(matched) && i < page*size; i++ {
+		out.Items = append(out.Items, usageEntryView{ledgerEntry: matched[i], CostYuan: yuan(matched[i].Cost)})
+	}
+	return out
+}
+
+// handleMyCalls pages through the caller's own calls.
+func (s *apiServer) handleMyCalls(w http.ResponseWriter, r *http.Request) {
+	principal := principalForRequest(r)
+	query, _, _, err := reportQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !principal.Service {
+		query.UserID = principal.UserID
+	}
+	entries, err := s.ledger.scan(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, pageCalls(entries, r.URL.Query()))
+}
+
+// handleAdminCalls pages through everyone's calls, optionally one user's.
+func (s *apiServer) handleAdminCalls(w http.ResponseWriter, r *http.Request) {
+	query, _, _, err := reportQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	query.UserID = strings.TrimSpace(r.URL.Query().Get("user"))
+	entries, err := s.ledger.scan(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, pageCalls(entries, r.URL.Query()))
+}
+
 func (s *apiServer) handleMyUsage(w http.ResponseWriter, r *http.Request) {
 	principal := principalForRequest(r)
 	query, from, to, err := reportQuery(r)

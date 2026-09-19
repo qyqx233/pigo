@@ -447,7 +447,7 @@ func TestRunKeysIgnoreTheEnvironment(t *testing.T) {
 	if got := lookup(context.Background(), "openrouter"); got != "" {
 		t.Errorf("key from the environment reached the run: %q", got)
 	}
-	if err := server.errNoProviderKey("user-1", "openrouter"); err == nil || !strings.Contains(err.Error(), "设置 → Provider") {
+	if err := server.errNoProviderKey("user-1", "openrouter"); err == nil || !strings.Contains(err.Error(), "设置 → 服务商") {
 		t.Errorf("errNoProviderKey = %v", err)
 	}
 

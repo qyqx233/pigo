@@ -22,9 +22,10 @@ func webCommands() []slashCommand {
 		{Name: "think", Description: "view or switch reasoning effort", ArgumentHint: "[off|minimal|low|medium|high|xhigh|max]", Source: "builtin", Available: true},
 		{Name: "effect", Description: "alias of /think", ArgumentHint: "[off|minimal|low|medium|high|xhigh|max]", Source: "builtin", Available: true},
 		{Name: "help", Description: "list available slash commands", Source: "builtin", Available: true},
+		{Name: "compact", Description: "compact the context now: summarize the earlier conversation, keep the recent part", Source: "builtin", Available: true},
 	}
 	unavailable := []string{
-		"exit", "quit", "compact", "fork", "clone", "tree", "rewind",
+		"exit", "quit", "fork", "clone", "tree", "rewind",
 		"export", "import", "copy", "session", "status", "goal", "btw",
 		"dream", "remote-control", "memory", "rebuild",
 	}

@@ -18,9 +18,10 @@ type openRouterModelsResponse struct {
 }
 
 type openRouterModel struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Architecture struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ContextLength int    `json:"context_length"`
+	Architecture  struct {
 		OutputModalities []string `json:"output_modalities"`
 	} `json:"architecture"`
 	Pricing struct {
@@ -63,6 +64,15 @@ func (s *apiServer) fetchOpenRouterFreeModels(r *http.Request) ([]modelResponse,
 		return nil, fmt.Errorf("decode OpenRouter models: %w", err)
 	}
 	models := make([]modelResponse, 0, len(payload.Data))
+	// Every model's window, not just the listed ones: a session may use a
+	// model the free list no longer shows.
+	windows := make(map[string]int, len(payload.Data))
+	for _, model := range payload.Data {
+		if id := strings.TrimSpace(model.ID); id != "" && model.ContextLength > 0 {
+			windows[id] = model.ContextLength
+		}
+	}
+	s.openRouterWindows.store(windows)
 	for _, model := range payload.Data {
 		if !zeroPrice(model.Pricing.Prompt) || !zeroPrice(model.Pricing.Completion) {
 			continue
@@ -78,7 +88,7 @@ func (s *apiServer) fetchOpenRouterFreeModels(r *http.Request) ([]modelResponse,
 		if label == "" {
 			label = id
 		}
-		models = append(models, modelResponse{ID: id, Label: label, Provider: "openrouter"})
+		models = append(models, modelResponse{ID: id, Label: label, Provider: "openrouter", ContextWindow: model.ContextLength})
 	}
 	sort.Slice(models, func(i, j int) bool {
 		left, right := strings.ToLower(models[i].Label), strings.ToLower(models[j].Label)

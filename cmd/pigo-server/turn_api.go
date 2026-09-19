@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -41,6 +42,18 @@ func (s *apiServer) turnLimits() turnLimits {
 // caller before it starts, so the caller sees every event. Caller holds
 // managed.mu.
 func (s *apiServer) startTurn(managed *managedSession, prompt, prefix string) (*turnRun, streamEvent, *turnSub, error) {
+	return s.startTurnWith(managed, func(ctx context.Context, run *turnRun) (string, error) {
+		if prefix != "" {
+			run.publish(streamEvent{Type: "delta", Text: prefix + "\n\n"})
+		}
+		reply, err := s.runMessage(ctx, managed, prompt, run.publish)
+		return prefixText(prefix, reply), err
+	})
+}
+
+// startTurnWith starts a turn whose work is body: it holds the session, can be
+// stopped, is metered and recorded like any turn. Caller holds managed.mu.
+func (s *apiServer) startTurnWith(managed *managedSession, body func(ctx context.Context, run *turnRun) (string, error)) (*turnRun, streamEvent, *turnSub, error) {
 	if managed.activeTurn() != nil {
 		return nil, streamEvent{}, nil, errTurnBusy
 	}
@@ -58,11 +71,8 @@ func (s *apiServer) startTurn(managed *managedSession, prompt, prefix string) (*
 
 	go run.watch()
 	go func() {
-		if prefix != "" {
-			run.publish(streamEvent{Type: "delta", Text: prefix + "\n\n"})
-		}
-		reply, err := s.runMessage(withRun(run.ctx, run), managed, prompt, run.publish)
-		s.finishTurn(managed, run, prefixText(prefix, reply), err)
+		reply, err := body(withRun(run.ctx, run), run)
+		s.finishTurn(managed, run, reply, err)
 	}()
 	return run, snapshot, sub, nil
 }

@@ -31,6 +31,9 @@ type activityItem struct {
 	ElapsedMs int64  `json:"elapsedMs,omitempty"`
 	// Output is the tail of a running command's output.
 	Output string `json:"output,omitempty"`
+	// Compaction is a "compaction" item's figures; Status is then "running",
+	// "ok" or "error", and Text the error.
+	Compaction *compactionReport `json:"compaction,omitempty"`
 }
 
 const (

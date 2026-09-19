@@ -153,11 +153,12 @@ type turnRun struct {
 	subs   map[*turnSub]struct{}
 
 	// transcriptStart is where this turn's user message sits in the
-	// transcript; history hides what follows it while the turn runs, because
-	// the snapshot carries it. Compaction rewrites the transcript, after
-	// which the position means nothing and nothing is hidden.
+	// transcript file; history hides what follows it while the turn runs,
+	// because the snapshot carries it. The file only grows (a compaction is
+	// appended), so the position holds — unless the file was rewritten, after
+	// which it means nothing and nothing is hidden.
 	transcriptStart int
-	compacted       bool
+	rewritten       bool
 
 	// Step counting and the step-limit wrap-up, touched only from the agent
 	// loop's goroutine (see installHooks). counted is how much of the message
@@ -259,6 +260,8 @@ func (r *turnRun) publish(ev streamEvent) {
 		}
 	case "tool":
 		r.foldToolLocked(ev)
+	case "compaction":
+		r.foldCompactionLocked(ev)
 	}
 	r.broadcastLocked(ev)
 }
@@ -304,6 +307,37 @@ func (r *turnRun) foldToolLocked(ev streamEvent) {
 	}
 }
 
+// foldCompactionLocked records a context compaction in the activity log. The
+// text written before it — often the turn's answer, since compaction runs after
+// the last call — moves into the log first, so the note follows it.
+func (r *turnRun) foldCompactionLocked(ev streamEvent) {
+	switch ev.Phase {
+	case "start":
+		if narration := strings.TrimSpace(r.text.String()); narration != "" {
+			r.activity = append(r.activity, activityItem{Kind: "text", Text: narration})
+		}
+		r.text.Reset()
+		r.activity = append(r.activity, activityItem{Kind: "compaction", Status: "running", Compaction: ev.Compaction})
+	case "end":
+		status := "ok"
+		if ev.IsError {
+			status = "error"
+		}
+		for i := len(r.activity) - 1; i >= 0; i-- {
+			if r.activity[i].Kind == "compaction" && r.activity[i].Status == "running" {
+				if skippedCompaction(ev) {
+					// Nothing was summarized: nothing to show.
+					r.activity = append(r.activity[:i], r.activity[i+1:]...)
+					return
+				}
+				r.activity[i].Status, r.activity[i].Text, r.activity[i].Compaction = status, ev.Error, ev.Compaction
+				return
+			}
+		}
+		r.activity = append(r.activity, activityItem{Kind: "compaction", Status: status, Text: ev.Error, Compaction: ev.Compaction})
+	}
+}
+
 func (r *turnRun) broadcastLocked(ev streamEvent) {
 	for sub := range r.subs {
 		select {
@@ -336,8 +370,6 @@ func (r *turnRun) observe(ev agentcore.AgentEvent) {
 			r.tool = ""
 			r.phaseSince = now
 		}
-	case agentcore.CompactionEvent:
-		r.compacted = true
 	}
 	alive := r.onAlive != nil && now.Sub(r.lastAlive) >= aliveEvery
 	if alive {
@@ -371,6 +403,14 @@ func (r *turnRun) stepCount() int {
 	return r.steps
 }
 
+// transcriptRewritten notes that the transcript file was rewritten, so the
+// position recorded by setTranscriptStart no longer holds.
+func (r *turnRun) transcriptRewritten() {
+	r.mu.Lock()
+	r.rewritten = true
+	r.mu.Unlock()
+}
+
 // setTranscriptStart records where the turn's user message sits.
 func (r *turnRun) setTranscriptStart(index int) {
 	r.mu.Lock()
@@ -387,7 +427,7 @@ func (r *turnRun) historyCut() int {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.compacted || r.transcriptStart < 0 {
+	if r.rewritten || r.transcriptStart < 0 {
 		return -1
 	}
 	return r.transcriptStart + 1

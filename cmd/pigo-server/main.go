@@ -72,14 +72,16 @@ type apiServer struct {
 	noTools             bool
 	toolNames           []string
 	exts                *toolExtensions
-	reaperStop          chan struct{}
-	auth                *authStore
-	customModels        *customModelStore
-	credentials         *credentialStore
-	settings            *settingsStore
-	ledger              *ledgerStore
-	meter               *meter
-	db                  *sqlDB
+	// openRouterWindows caches OpenRouter's model windows (context_params.go).
+	openRouterWindows openRouterWindowCache
+	reaperStop        chan struct{}
+	auth              *authStore
+	customModels      *customModelStore
+	credentials       *credentialStore
+	settings          *settingsStore
+	ledger            *ledgerStore
+	meter             *meter
+	db                *sqlDB
 
 	mu       sync.RWMutex
 	sessions map[string]*managedSession
@@ -118,6 +120,8 @@ type modelResponse struct {
 	// "free" (OpenRouter's live free catalog) or "preset" (the built-in preset
 	// of a provider that has a key).
 	Source string `json:"source,omitempty"`
+	// ContextWindow is the model's window when its catalog says (OpenRouter).
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 type streamEvent struct {
@@ -151,6 +155,8 @@ type streamEvent struct {
 	Detail string `json:"detail,omitempty"`
 	// Activity is the "snapshot" event's log of the turn so far.
 	Activity []activityItem `json:"activity,omitempty"`
+	// Compaction is a "compaction" event's figures (context_compact.go).
+	Compaction *compactionReport `json:"compaction,omitempty"`
 }
 
 func main() {
@@ -235,6 +241,7 @@ func main() {
 	// usage.
 	mux.Handle("GET /api/prices", api.requirePrincipal(http.HandlerFunc(api.handleListPrices)))
 	mux.Handle("GET /api/usage", api.requirePrincipal(http.HandlerFunc(api.handleMyUsage)))
+	mux.Handle("GET /api/usage/calls", api.requirePrincipal(http.HandlerFunc(api.handleMyCalls)))
 
 	// A user's own provider keys.
 	mux.Handle("GET /api/credentials", api.requirePrincipal(http.HandlerFunc(api.handleListCredentials)))
@@ -258,9 +265,14 @@ func main() {
 	mux.Handle("PUT /api/admin/providers", admin(api.handlePutCustomProvider))
 	mux.Handle("DELETE /api/admin/providers/{name}", admin(api.handleDeleteCustomProvider))
 	mux.Handle("PATCH /api/admin/providers/{name}", admin(api.handlePatchCustomProvider))
+	mux.Handle("GET /api/model-params", api.requirePrincipal(http.HandlerFunc(api.handleListModelParams)))
+	mux.Handle("PUT /api/admin/model-params", admin(api.handlePutModelParam))
+	mux.Handle("DELETE /api/admin/model-params", admin(api.handleDeleteModelParam))
+	mux.Handle("PUT /api/admin/model-params/defaults", admin(api.handlePutContextDefaults))
 	mux.Handle("PUT /api/admin/prices", admin(api.handlePutPrice))
 	mux.Handle("DELETE /api/admin/prices", admin(api.handleDeletePrice))
 	mux.Handle("GET /api/admin/usage", admin(api.handleAdminUsage))
+	mux.Handle("GET /api/admin/usage/calls", admin(api.handleAdminCalls))
 	mux.Handle("GET /api/admin/users", admin(api.handleListUsers))
 	mux.Handle("POST /api/admin/users/{id}/disable", admin(api.handleSetUserDisabled))
 	mux.Handle("POST /api/admin/users/{id}/password", admin(api.handleResetUserPassword))
@@ -662,6 +674,23 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("custom model %q expired on %s; switch model before sending", m.ID, m.ExpiresAt))
 		return
 	}
+	if isCompactCommand(request.Prompt) {
+		// /compact is a turn of its own: it holds the session and is metered.
+		run, snapshot, sub, err := s.startTurnWith(managed, func(ctx context.Context, run *turnRun) (string, error) {
+			return s.compactSession(ctx, managed, run)
+		})
+		managed.mu.Unlock()
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if r.URL.Query().Get("stream") == "true" {
+			s.streamTurn(w, r, run, snapshot, sub, nil)
+			return
+		}
+		s.waitTurn(w, r, run, sub)
+		return
+	}
 	if managed.meta.Title == "" {
 		managed.meta.Title = cleanSessionTitle(request.Prompt)
 	}
@@ -881,6 +910,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 // naming profile the session's current model gets.
 func (s *apiServer) sessionJSON(managed *managedSession) map[string]any {
 	out := sessionResponse(managed)
+	// The context window and compaction threshold its current model gets.
+	out["context"] = s.contextParams(managed.meta.Provider, managed.meta.Model)
 	if name := s.profileName(managed.meta.Provider, managed.meta.Model); name != "" {
 		out["toolProfile"] = name
 		out["toolNames"] = s.exts.profiles[name].wireNames()
