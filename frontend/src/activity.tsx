@@ -11,7 +11,7 @@
 // MessagePrimitive.GroupedParts.
 import { MessagePrimitive, useAuiState, type ThreadAssistantMessagePart } from "@assistant-ui/react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import type { ActivityItem } from "./api";
+import type { ActivityItem, CompactionReport } from "./api";
 import { MarkdownText } from "./markdown";
 
 const toolGlyph: Record<string, string> = {
@@ -35,16 +35,32 @@ type ToolResult = { summary?: string; elapsedMs?: number };
 // turnContent lays a turn out as message parts, in the order it happened.
 export function turnContent(items: ActivityItem[], text: string): ThreadAssistantMessagePart[] {
   const parts: ThreadAssistantMessagePart[] = [];
+  // Tool call ids must be unique within a message (assistant-ui keys parts by
+  // them and throws on a duplicate, blanking the page), but some servers
+  // number them per response (call_0, call_1 …) and a message can span
+  // several responses.
+  const used = new Set<string>();
+  const uniqueId = (id: string) => {
+    let out = id;
+    for (let n = 2; used.has(out); n++) out = `${id}#${n}`;
+    used.add(out);
+    return out;
+  };
   items.forEach((item, index) => {
     if (item.kind === "text") {
       if (item.text?.trim()) parts.push({ type: "text", text: item.text });
+      return;
+    }
+    if (item.kind === "compaction") {
+      const data: CompactionData = { status: item.status ?? "ok", error: item.text, summary: item.summary, ...item.compaction };
+      parts.push({ type: "data", name: "compaction", data });
       return;
     }
     const args: ToolArgs = { detail: item.detail, ...(item.output ? { output: item.output } : {}) };
     const done = item.status === "ok" || item.status === "error";
     parts.push({
       type: "tool-call",
-      toolCallId: item.id ?? `call-${index}`,
+      toolCallId: uniqueId(item.id ?? `call-${index}`),
       toolName: item.tool ?? "tool",
       args,
       argsText: item.detail ?? "",
@@ -59,7 +75,56 @@ export function turnContent(items: ActivityItem[], text: string): ThreadAssistan
 // cut off with it, and will never report.
 export function cutOff(items: ActivityItem[]): ActivityItem[] {
   return items.map((item) =>
-    item.kind === "tool" && item.status === "running" ? { ...item, status: "error" as const, text: "未完成", output: undefined } : item,
+    (item.kind === "tool" || item.kind === "compaction") && item.status === "running"
+      ? { ...item, status: "error" as const, text: "未完成", output: undefined }
+      : item,
+  );
+}
+
+// CompactionData is what a compaction part carries.
+type CompactionData = CompactionReport & { status: "running" | "ok" | "error"; error?: string; summary?: string };
+
+function tokens(n?: number): string {
+  if (!n) return "0";
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
+}
+
+// CompactionNote is a context compaction in the conversation: running, done
+// (sizes before and after, and — in history — the summary), or failed, which
+// leaves the conversation as it was.
+function CompactionNote({ data }: { data: CompactionData }) {
+  const manual = data.reason === "manual";
+  if (data.status === "running") {
+    return (
+      <div className="compaction-note compaction-running">
+        <i className="activity-spinner" /> 正在压缩上下文（{tokens(data.before)} token）…
+      </div>
+    );
+  }
+  if (data.status === "error") {
+    return (
+      <div className="compaction-note compaction-error">
+        ⟲ 上下文压缩失败：{data.error || "未知原因"}。对话照常继续，下次再试。
+      </div>
+    );
+  }
+  if (!data.summarized && !data.summary) {
+    return <div className="compaction-note">⟲ 上下文还很短，没有可以压缩的内容</div>;
+  }
+  return (
+    <div className="compaction-note">
+      {/* No "after" size: the estimate right after a compaction still counts
+          the kept reply's reported usage, so it is not the real size. The
+          next reply's usage line shows that. */}
+      ⟲ {manual ? "已按要求压缩上下文" : `上下文约 ${tokens(data.before)} token，接近上限，已自动压缩`}
+      {data.summarized ? `：总结了 ${data.summarized} 条较早的消息，最近的对话原样保留` : ""}
+      {data.summary && (
+        <details>
+          <summary>查看摘要</summary>
+          <pre className="compaction-summary">{data.summary}</pre>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -198,6 +263,8 @@ export function TurnParts() {
             );
           case "text":
             return <MarkdownText />;
+          case "data":
+            return part.name === "compaction" ? <CompactionNote data={part.data as CompactionData} /> : null;
           case "tool-call":
             return (
               <ToolLine

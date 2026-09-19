@@ -11,6 +11,7 @@
 // context in App.tsx, so this module has no import cycle with it.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
+  ContextInfo,
   CallUsage,
   ModelInfo,
   ModelPrice,
@@ -18,6 +19,7 @@ import type {
   PriceList,
   ProviderInfo,
   TurnUsage,
+  CallsPage,
   UsageGroup,
   UsageQuery,
   UsageReport,
@@ -85,9 +87,27 @@ function callDetail(call: CallUsage): string {
 
 // UsageLine sums every model call of the turn — tool rounds and context
 // compaction included — into one line; hovering lists the calls.
-export function UsageLine({ usage }: { usage: TurnUsage }) {
+// contextTokens is how big the context was at the turn's last chat call: what
+// it sent (input, cache) plus what it wrote. A compaction after that call is
+// not in it; its own note shows the size after.
+function contextTokens(usage: TurnUsage): number | null {
+  const chats = usage.details.filter((call) => call.kind === "chat" && call.status !== "aborted");
+  const last = chats[chats.length - 1];
+  if (!last) return null;
+  return last.input + last.cacheRead + last.cacheWrite + last.output;
+}
+
+const windowSourceLabel: Record<string, string> = {
+  override: "模型单独设置",
+  openrouter: "OpenRouter 目录",
+  default: "默认",
+};
+
+export function UsageLine({ usage, context }: { usage: TurnUsage; context?: ContextInfo }) {
   const self = usage.selfCost > 0 && usage.platformCost === 0;
   const title = usage.details.map(callDetail).join("\n\n");
+  const used = context ? contextTokens(usage) : null;
+  const compactAt = context ? Math.floor((context.window * context.compactPct) / 100) : 0;
   return (
     <div className="usage-line" title={title}>
       <span>输入 {formatTokens(usage.input)}</span>
@@ -95,6 +115,14 @@ export function UsageLine({ usage }: { usage: TurnUsage }) {
       {usage.cacheWrite > 0 && <span>写缓存 {formatTokens(usage.cacheWrite)}</span>}
       <span>输出 {formatTokens(usage.output)}</span>
       {usage.calls > 1 && <span>{usage.calls} 次调用</span>}
+      {context && used !== null && (
+        <span
+          className={used >= compactAt * 0.9 ? "usage-context usage-warn" : "usage-context"}
+          title={`上下文 ${used} / 窗口 ${context.window}（${windowSourceLabel[context.windowSource] ?? context.windowSource}）\n超过 ${context.compactPct}%（${compactAt}）时自动压缩\n窗口按当前模型计`}
+        >
+          上下文 {formatTokens(used)}/{formatTokens(context.window)}
+        </span>
+      )}
       <strong>{usage.unpriced === usage.calls ? "未定价" : formatYuan(usage.cost)}</strong>
       {self && <em>自付</em>}
       {usage.unpriced > 0 && usage.unpriced < usage.calls && <em>部分未定价</em>}
@@ -144,29 +172,105 @@ const presets: { label: string; range(): [string, string] }[] = [
   },
 ];
 
-function TotalsGrid({ totals }: { totals: UsageTotals }) {
+// hitRate is the share of a period's prompt tokens served from the cache.
+function hitRate(t: { input: number; cacheRead: number; cacheWrite: number }): number | null {
+  const prompt = t.input + t.cacheRead + t.cacheWrite;
+  return prompt > 0 ? t.cacheRead / prompt : null;
+}
+
+function percent(rate: number | null): string {
+  return rate === null ? "—" : `${Math.round(rate * 100)}%`;
+}
+
+// Summary is the period at a glance: what it cost, then the token figures;
+// the key split and unknown usage only when there is something to say.
+function Summary({ totals }: { totals: UsageTotals }) {
+  const extras = [
+    totals.selfCost > 0 && `平台 Key ${formatYuan(totals.platformCost)} · 自带 Key ${formatYuan(totals.selfCost)}`,
+    totals.unpriced > 0 && `${totals.unpriced} 次调用的模型未定价，按 0 计`,
+    totals.incomplete > 0 && `${totals.incomplete} 次调用用量未知（中断或未上报）`,
+  ].filter(Boolean) as string[];
   return (
-    <div className="metric-grid usage-metrics">
-      <div className="metric"><strong>{formatYuan(totals.cost)}</strong><span>费用（{totals.calls} 次调用）</span></div>
-      <div className="metric"><strong>{formatTokens(totals.input + totals.cacheRead + totals.cacheWrite)}</strong><span>总输入（含缓存命中 {formatTokens(totals.cacheRead)}）</span></div>
-      <div className="metric"><strong>{formatTokens(totals.output)}</strong><span>输出{totals.reasoning ? `（推理 ${formatTokens(totals.reasoning)}）` : ""}</span></div>
-      <div className="metric"><strong>{formatYuan(totals.platformCost)}</strong><span>平台 Key 支出</span></div>
-      <div className="metric"><strong>{formatYuan(totals.selfCost)}</strong><span>自带 Key 支出</span></div>
-      <div className="metric">
-        <strong>{totals.incomplete}</strong>
-        <span>用量未知的调用</span>
+    <div className="usage-summary">
+      <div className="usage-headline">
+        <strong>{formatYuan(totals.cost)}</strong>
+        <span>
+          {totals.calls} 次调用{totals.calls > 0 ? ` · 平均每次 ${formatYuan(totals.cost / totals.calls)}` : ""}
+        </span>
+      </div>
+      <div className="usage-stats">
+        <div><span>输入</span><strong>{formatTokens(totals.input + totals.cacheRead + totals.cacheWrite)}</strong></div>
+        <div><span>缓存命中率</span><strong>{percent(hitRate(totals))}</strong></div>
+        <div><span>输出</span><strong>{formatTokens(totals.output)}</strong>{totals.reasoning > 0 && <small>含推理 {formatTokens(totals.reasoning)}</small>}</div>
+      </div>
+      {extras.length > 0 && (
+        <ul className="usage-extras">
+          {extras.map((text) => <li key={text}>{text}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// days lists every date from from to to, inclusive.
+function days(from: string, to: string): string[] {
+  const out: string[] = [];
+  const end = new Date(`${to}T00:00:00`);
+  for (let d = new Date(`${from}T00:00:00`); d <= end && out.length < 400; d.setDate(d.getDate() + 1)) {
+    out.push(localDate(d));
+  }
+  return out;
+}
+
+// DailyChart shows the period day by day: cost when anything was priced,
+// tokens otherwise. Clicking a day narrows the page to it.
+function DailyChart({ report, onPick }: { report: UsageReport; onPick(day: string): void }) {
+  const byDay = new Map(report.byDay.map((row) => [row.key, row]));
+  const range = days(report.from, report.to);
+  if (range.length < 2) return null;
+  const byCost = report.totals.cost > 0;
+  const value = (row?: UsageGroup) => (row ? (byCost ? row.cost : row.input + row.cacheRead + row.cacheWrite + row.output) : 0);
+  const max = Math.max(...range.map((day) => value(byDay.get(day))), 0);
+  if (max === 0) return null;
+  const labelEvery = Math.ceil(range.length / 10);
+  return (
+    <div className="usage-block">
+      <h4>每日{byCost ? "费用" : " token"}<small>点击某天只看那天</small></h4>
+      <div className="usage-chart">
+        {range.map((day, index) => {
+          const row = byDay.get(day);
+          const v = value(row);
+          return (
+            <button
+              key={day}
+              type="button"
+              className="usage-bar"
+              title={row ? `${day}\n${row.calls} 次调用 · ${formatYuan(row.cost)}\n输入 ${formatTokens(row.input + row.cacheRead + row.cacheWrite)}（命中 ${percent(hitRate(row))}）· 输出 ${formatTokens(row.output)}` : `${day}\n没有调用`}
+              disabled={!row}
+              onClick={() => onPick(day)}
+            >
+              <span className="usage-bar-fill" style={{ height: `${Math.max(v > 0 ? 3 : 0, (v / max) * 100)}%` }} />
+              <span className="usage-bar-label">{index % labelEvery === 0 ? day.slice(5) : ""}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function GroupTable({ title, rows, keyLabel, onPick }: {
+// GroupTable is a breakdown (by model, by user) with each row's share of the
+// period and its cache hit rate. onPick makes the key a link.
+function GroupTable({ title, rows, keyLabel, total, onPick }: {
   title: string;
   rows: UsageGroup[];
   keyLabel: string;
+  total: UsageTotals;
   onPick?(row: UsageGroup): void;
 }) {
   if (rows.length === 0) return null;
+  const byCost = total.cost > 0;
+  const whole = byCost ? total.cost : total.input + total.cacheRead + total.cacheWrite + total.output;
   return (
     <div className="usage-block">
       <h4>{title}</h4>
@@ -174,28 +278,36 @@ function GroupTable({ title, rows, keyLabel, onPick }: {
         <table className="usage-table">
           <thead>
             <tr>
-              <th>{keyLabel}</th><th>调用</th><th>输入</th><th>缓存命中</th><th>输出</th><th>费用</th>
+              <th>{keyLabel}</th><th>占比</th><th>调用</th><th>输入</th><th>命中率</th><th>输出</th><th>费用</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row.key}>
-                <td>
-                  {onPick ? (
-                    <button type="button" className="usage-link" onClick={() => onPick(row)}>{row.label || row.key}</button>
-                  ) : (
-                    row.label || row.key
-                  )}
-                  {row.deleted && <em className="usage-tag">已删除用户</em>}
-                  {row.unpriced > 0 && <em className="usage-tag">未定价 {row.unpriced}</em>}
-                </td>
-                <td>{row.calls}</td>
-                <td>{formatTokens(row.input + row.cacheWrite)}</td>
-                <td>{formatTokens(row.cacheRead)}</td>
-                <td>{formatTokens(row.output)}</td>
-                <td>{formatYuan(row.cost)}</td>
-              </tr>
-            ))}
+            {rows.map((row) => {
+              const part = byCost ? row.cost : row.input + row.cacheRead + row.cacheWrite + row.output;
+              const share = whole > 0 ? part / whole : 0;
+              return (
+                <tr key={row.key}>
+                  <td>
+                    {onPick ? (
+                      <button type="button" className="usage-link" onClick={() => onPick(row)}>{row.label || row.key}</button>
+                    ) : (
+                      row.label || row.key
+                    )}
+                    {row.deleted && <em className="usage-tag">已删除用户</em>}
+                    {row.unpriced > 0 && <em className="usage-tag">未定价 {row.unpriced}</em>}
+                  </td>
+                  <td className="usage-share-cell">
+                    <span className="usage-share"><span style={{ width: `${Math.round(share * 100)}%` }} /></span>
+                    {Math.round(share * 100)}%
+                  </td>
+                  <td>{row.calls}</td>
+                  <td>{formatTokens(row.input + row.cacheRead + row.cacheWrite)}</td>
+                  <td>{percent(hitRate(row))}</td>
+                  <td>{formatTokens(row.output)}</td>
+                  <td>{formatYuan(row.cost)}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -203,51 +315,120 @@ function GroupTable({ title, rows, keyLabel, onPick }: {
   );
 }
 
-function RecentTable({ report, admin }: { report: UsageReport; admin: boolean }) {
-  if (report.recent.length === 0) return null;
+const callsPageSize = 50;
+
+// Calls lists the period's calls a page at a time, newest first, filtered by
+// model and kind.
+function Calls({ api, query, report, admin, modelKey, onModelKey }: {
+  api: PigoAPI;
+  query: UsageQuery;
+  report: UsageReport;
+  admin: boolean;
+  modelKey: string;
+  onModelKey(key: string): void;
+}) {
+  const [kind, setKind] = useState("");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<CallsPage | null>(null);
+  const [error, setError] = useState("");
+
+  // A new period or filter starts from the first page.
+  useEffect(() => setPage(1), [query, modelKey, kind]);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .usageCalls(query, { modelKey: modelKey || undefined, kind: kind || undefined, page, size: callsPageSize }, admin)
+      .then((next) => {
+        if (live) {
+          setData(next);
+          setError("");
+        }
+      })
+      .catch((cause) => live && setError(errorText(cause)));
+    return () => {
+      live = false;
+    };
+  }, [api, query, modelKey, kind, page, admin]);
+
+  const pages = data ? Math.max(1, Math.ceil(data.total / data.size)) : 1;
+  const multiDay = report.from !== report.to;
+  const when = (at: string) =>
+    new Date(at).toLocaleString("zh-CN", multiDay
+      ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }
+      : { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
   return (
-    <div className="usage-block">
-      <h4>最近调用{report.recent.length >= 200 ? "（最新 200 条，完整明细请导出 CSV）" : ""}</h4>
-      <div className="usage-table-wrap">
-        <table className="usage-table">
-          <thead>
-            <tr>
-              <th>时间</th>{admin && <th>用户</th>}<th>模型</th><th>类型</th><th>输入</th><th>缓存</th><th>输出</th><th>费用</th>
-            </tr>
-          </thead>
-          <tbody>
-            {report.recent.map((entry) => (
-              <tr key={entry.id} className={entry.status !== "ok" ? "usage-row-muted" : undefined}>
-                <td>{new Date(entry.at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
-                {admin && <td>{entry.username || entry.userId || "—"}</td>}
-                <td title={`${entry.provider}/${entry.model}${entry.responseModel && entry.responseModel !== entry.model ? ` → ${entry.responseModel}` : ""}`}>
-                  {entry.responseModel || entry.model}
-                </td>
-                <td>
-                  {kindLabel[entry.kind] ?? entry.kind}
-                  {entry.status !== "ok" && <em className="usage-tag">{statusLabel[entry.status] ?? entry.status}</em>}
-                  {entry.billedTo === "self" && <em className="usage-tag">自付</em>}
-                </td>
-                <td>{entry.input}</td>
-                <td>{entry.cacheRead + entry.cacheWrite}</td>
-                <td>{entry.output}</td>
-                <td>{entry.priced ? formatYuan(entry.costYuan) : "未定价"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="usage-block" id="usage-calls">
+      <div className="usage-calls-head">
+        <h4>调用明细{data ? <small>共 {data.total} 次</small> : null}</h4>
+        <div className="usage-calls-filters">
+          <select className="settings-input settings-select" value={modelKey} onChange={(event) => onModelKey(event.target.value)}>
+            <option value="">全部模型</option>
+            {report.byModel.map((row) => <option key={row.key} value={row.key}>{row.key}</option>)}
+          </select>
+          <select className="settings-input settings-select" value={kind} onChange={(event) => setKind(event.target.value)}>
+            <option value="">全部类型</option>
+            <option value="chat">对话</option>
+            <option value="compaction">上下文压缩</option>
+          </select>
+        </div>
       </div>
+      {error && <p className="credential-note">{error}</p>}
+      {data && data.items.length === 0 && <p className="credential-note">没有符合条件的调用。</p>}
+      {data && data.items.length > 0 && (
+        <div className="usage-table-wrap">
+          <table className="usage-table">
+            <thead>
+              <tr>
+                <th>时间</th>{admin && <th>用户</th>}<th>模型</th><th>类型</th><th>输入</th><th>缓存命中</th><th>输出</th><th>费用</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.map((entry) => (
+                <tr key={entry.id} className={entry.status !== "ok" ? "usage-row-muted" : undefined}>
+                  <td>{when(entry.at)}</td>
+                  {admin && <td>{entry.username || entry.userId || "—"}</td>}
+                  <td title={`${entry.provider}/${entry.model}${entry.responseModel && entry.responseModel !== entry.model ? ` → ${entry.responseModel}` : ""}`}>
+                    {entry.responseModel || entry.model}
+                  </td>
+                  <td>
+                    {kindLabel[entry.kind] ?? entry.kind}
+                    {entry.status !== "ok" && <em className="usage-tag">{statusLabel[entry.status] ?? entry.status}</em>}
+                    {entry.billedTo === "self" && <em className="usage-tag">自付</em>}
+                  </td>
+                  <td>{formatTokens(entry.input + entry.cacheRead + entry.cacheWrite)}</td>
+                  <td>{entry.cacheRead ? `${formatTokens(entry.cacheRead)} · ${percent(hitRate(entry))}` : "—"}</td>
+                  <td>{formatTokens(entry.output)}</td>
+                  <td>{entry.priced ? formatYuan(entry.costYuan) : "未定价"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data && pages > 1 && (
+        <div className="usage-pager">
+          <button type="button" className="ghost-button" disabled={page <= 1} onClick={() => setPage(1)}>首页</button>
+          <button type="button" className="ghost-button" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button>
+          <span>第 {page} / {pages} 页</span>
+          <button type="button" className="ghost-button" disabled={page >= pages} onClick={() => setPage(page + 1)}>下一页</button>
+          <button type="button" className="ghost-button" disabled={page >= pages} onClick={() => setPage(pages)}>末页</button>
+        </div>
+      )}
     </div>
   );
 }
 
-// UsagePanel is the personal report, or with `admin` the deployment-wide one:
-// the same figures, plus a per-user breakdown, a user filter, and the list of
-// models that were used without a price.
-export function UsagePanel({ api, admin = false }: { api: PigoAPI; admin?: boolean }) {
+// UsagePanel is the personal report and, for an administrator, the
+// deployment-wide one behind a 我的 / 全员 switch: the same figures, plus a
+// per-user breakdown, a user filter, and the models used without a price.
+export function UsagePanel({ api, canSeeAll = false, initialAll = false }: { api: PigoAPI; canSeeAll?: boolean; initialAll?: boolean }) {
+  const [admin, setAdmin] = useState(canSeeAll && initialAll);
   const [from, setFrom] = useState(monthStart);
   const [to, setTo] = useState(() => localDate(new Date()));
   const [user, setUser] = useState<{ id: string; name: string } | null>(null);
+  const [modelKey, setModelKey] = useState("");
   const [report, setReport] = useState<UsageReport | null>(null);
   const [loading, setLoading] = useState(false);
   const { report: say, view } = usePanelMessage();
@@ -278,6 +459,11 @@ export function UsagePanel({ api, admin = false }: { api: PigoAPI; admin?: boole
     }
   }
 
+  const activePreset = presets.find((preset) => {
+    const [start, end] = preset.range();
+    return start === from && end === to;
+  });
+
   return (
     <section className="settings-section">
       <PanelHeading
@@ -289,15 +475,38 @@ export function UsagePanel({ api, admin = false }: { api: PigoAPI; admin?: boole
         }
         icon="¥"
       />
+      {canSeeAll && (
+        <div className="usage-scope" role="tablist">
+          {[
+            { all: false, label: "我的" },
+            { all: true, label: "全员" },
+          ].map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              role="tab"
+              aria-selected={admin === item.all}
+              className={admin === item.all ? "ghost-button active" : "ghost-button"}
+              onClick={() => {
+                if (admin === item.all) return;
+                setAdmin(item.all);
+                setUser(null);
+                setModelKey("");
+                navigate(item.all ? "/settings/admin-usage" : "/settings/usage");
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="usage-filters">
-        <label>从 <input type="date" className="settings-input" value={from} max={to} onChange={(event) => setFrom(event.target.value)} /></label>
-        <label>到 <input type="date" className="settings-input" value={to} min={from} onChange={(event) => setTo(event.target.value)} /></label>
         <div className="usage-presets">
           {presets.map((preset) => (
             <button
               key={preset.label}
               type="button"
-              className="ghost-button"
+              className={activePreset === preset ? "ghost-button active" : "ghost-button"}
               onClick={() => {
                 const [start, end] = preset.range();
                 setFrom(start);
@@ -308,17 +517,20 @@ export function UsagePanel({ api, admin = false }: { api: PigoAPI; admin?: boole
             </button>
           ))}
         </div>
+        <label><input type="date" className="settings-input" value={from} max={to} onChange={(event) => setFrom(event.target.value)} /></label>
+        <span className="usage-range-sep">至</span>
+        <label><input type="date" className="settings-input" value={to} min={from} onChange={(event) => setTo(event.target.value)} /></label>
         {user && (
           <button type="button" className="ghost-button active" onClick={() => setUser(null)} title="清除用户筛选">
             用户：{user.name} ×
           </button>
         )}
-        <button type="button" className="ghost-button" disabled={loading} onClick={() => void exportCSV()}>导出 CSV</button>
+        <button type="button" className="ghost-button usage-export" disabled={loading} onClick={() => void exportCSV()}>导出 CSV</button>
       </div>
 
       {report && (
         <>
-          <TotalsGrid totals={report.totals} />
+          <Summary totals={report.totals} />
           {report.totals.calls === 0 && <p className="credential-note">这段时间没有模型调用。</p>}
           {admin && report.unpriced.length > 0 && (
             <div className="usage-unpriced">
@@ -331,17 +543,35 @@ export function UsagePanel({ api, admin = false }: { api: PigoAPI; admin?: boole
               <button type="button" className="ghost-button" onClick={() => navigate("/settings/prices")}>去定价</button>
             </div>
           )}
+          <DailyChart
+            report={report}
+            onPick={(day) => {
+              setFrom(day);
+              setTo(day);
+            }}
+          />
           {admin && !user && (
             <GroupTable
               title="按用户"
               keyLabel="用户"
+              total={report.totals}
               rows={report.byUser ?? []}
               onPick={(row) => setUser({ id: row.key, name: row.label || row.key })}
             />
           )}
-          <GroupTable title="按模型" keyLabel="provider/模型" rows={report.byModel} />
-          <GroupTable title="按日" keyLabel="日期" rows={report.byDay} />
-          <RecentTable report={report} admin={admin} />
+          <GroupTable
+            title="按模型"
+            keyLabel="服务商/模型"
+            total={report.totals}
+            rows={report.byModel}
+            onPick={(row) => {
+              setModelKey(row.key);
+              document.getElementById("usage-calls")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          />
+          {report.totals.calls > 0 && (
+            <Calls api={api} query={query} report={report} admin={admin} modelKey={modelKey} onModelKey={setModelKey} />
+          )}
         </>
       )}
       {view}
@@ -392,7 +622,7 @@ export function Prices({ api, isAdmin, providers, models }: {
     const input = number(draft.input);
     const output = number(draft.output);
     if (!draft.provider.trim() || !draft.model.trim() || input === undefined || output === undefined) {
-      report("provider、模型、输入价和输出价都要填", true);
+      report("服务商、模型、输入价和输出价都要填", true);
       return;
     }
     const values = [input, output, number(draft.cacheRead), number(draft.cacheWrite)];
@@ -443,7 +673,7 @@ export function Prices({ api, isAdmin, providers, models }: {
           <table className="usage-table">
             <thead>
               <tr>
-                <th>provider/模型</th><th>输入</th><th>缓存命中</th><th>缓存写入</th><th>输出</th>{isAdmin && <th />}
+                <th>服务商/模型</th><th>输入</th><th>缓存命中</th><th>缓存写入</th><th>输出</th>{isAdmin && <th />}
               </tr>
             </thead>
             <tbody>
@@ -476,7 +706,7 @@ export function Prices({ api, isAdmin, providers, models }: {
             <label>
               provider
               <select className="settings-input settings-select" value={draft.provider} onChange={(event) => setDraft({ ...draft, provider: event.target.value })}>
-                <option value="">选择 provider</option>
+                <option value="">选择服务商</option>
                 {providers.map((item) => (
                   <option key={item.name} value={item.name}>{item.name}{item.custom ? "（自定义）" : ""}</option>
                 ))}

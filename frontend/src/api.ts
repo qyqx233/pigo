@@ -24,6 +24,8 @@ export type SessionInfo = {
   // what it renames (canonical → model-facing).
   toolProfile?: string;
   toolNames?: Record<string, string>;
+  // context: the window and compaction threshold its current model gets.
+  context?: ContextInfo;
   // turn is the running (or just-finished) turn; lastTurn how the last one
   // ended, kept across restarts.
   turn?: TurnInfo;
@@ -76,7 +78,7 @@ export type TurnHandlers = {
 
 export type HistoryMessage = {
   id: string;
-  role: "user" | "assistant" | "toolCall" | "toolResult";
+  role: "user" | "assistant" | "toolCall" | "toolResult" | "compaction";
   content?: string;
   createdAt: string;
   toolName?: string;
@@ -89,12 +91,27 @@ export type HistoryMessage = {
   summary?: string;
   // The turn's model usage, on the turn's last assistant message.
   usage?: TurnUsage;
+  // A "compaction" message's figures; its content is the summary.
+  compaction?: CompactionReport;
+};
+
+// CompactionReport is a context compaction's figures, in estimated tokens.
+export type CompactionReport = {
+  // "threshold" (automatic) or "manual" (/compact).
+  reason?: string;
+  before?: number;
+  after?: number;
+  summarized?: number;
 };
 
 // ActivityItem is one line of a turn's activity log: the model's narration
-// between tool calls, or a tool call with its status.
+// between tool calls, a tool call with its status, or a context compaction.
 export type ActivityItem = {
-  kind: "text" | "tool";
+  kind: "text" | "tool" | "compaction";
+  // compaction: its figures; summary is the text that replaced the earlier
+  // conversation (history only).
+  compaction?: CompactionReport;
+  summary?: string;
   text?: string;
   tool?: string;
   id?: string;
@@ -111,7 +128,18 @@ export type ActivityItem = {
 export function foldActivity(
   items: ActivityItem[],
   text: string,
-  event: { phase?: string; tool?: string; id?: string; detail?: string; text?: string; isError?: boolean; elapsedMs?: number },
+  event: {
+    type?: string;
+    phase?: string;
+    tool?: string;
+    id?: string;
+    detail?: string;
+    text?: string;
+    error?: string;
+    isError?: boolean;
+    elapsedMs?: number;
+    compaction?: CompactionReport;
+  },
 ): { items: ActivityItem[]; text: string } {
   const next = [...items];
   const find = () => {
@@ -124,6 +152,25 @@ export function foldActivity(
     if (text.trim()) next.push({ kind: "text", text: text.trim() });
     text = "";
   };
+  if (event.type === "compaction") {
+    // Compaction runs after the turn's last call: the answer written so far
+    // moves into the log first, so the note follows it.
+    if (event.phase === "start") {
+      moveNarration();
+      next.push({ kind: "compaction", status: "running", compaction: event.compaction });
+    } else if (event.phase === "end") {
+      const done: ActivityItem = { kind: "compaction", status: event.isError ? "error" : "ok", text: event.error, compaction: event.compaction };
+      const i = next.map((item) => item.kind === "compaction" && item.status === "running").lastIndexOf(true);
+      // An automatic compaction that found nothing old enough to summarize
+      // leaves no trace, as on the server.
+      const skipped = !event.isError && event.compaction?.reason !== "manual" && !event.compaction?.summarized;
+      if (skipped) {
+        if (i >= 0) next.splice(i, 1);
+      } else if (i >= 0) next[i] = done;
+      else next.push(done);
+    }
+    return { items: next, text };
+  }
   if (event.phase === "start") {
     moveNarration();
     next.push({ kind: "tool", tool: event.tool, id: event.id, detail: event.detail, status: "running" });
@@ -214,8 +261,14 @@ export type UsageReport = {
   byModel: UsageGroup[];
   byUser?: UsageGroup[];
   unpriced: { provider: string; model: string; calls: number }[];
-  recent: UsageEntry[];
 };
+
+// CallsPage is one page of a period's calls, newest first.
+export type CallsPage = { total: number; page: number; size: number; items: UsageEntry[] };
+
+// CallsFilter narrows the call list: modelKey is a by-model row's key
+// (provider/model), kind "chat" or "compaction".
+export type CallsFilter = { modelKey?: string; kind?: string; page: number; size: number };
 
 export type UsageQuery = { from?: string; to?: string; user?: string; provider?: string; model?: string; session?: string };
 
@@ -258,7 +311,31 @@ export type ModelInfo = {
   // "custom" (added on this server), "free" (OpenRouter's free catalog) or
   // "preset" (a built-in model of a provider that has a key).
   source?: "custom" | "free" | "preset";
+  // contextWindow: the model's window when its catalog says (OpenRouter).
+  contextWindow?: number;
 };
+
+// ContextInfo is the context window and compaction threshold (a percentage
+// of the window) a model gets, and where each came from.
+export type ContextInfo = {
+  window: number;
+  compactPct: number;
+  windowSource: "override" | "openrouter" | "default";
+  pctSource: "override" | "default";
+};
+
+// ModelParam overrides the window and/or threshold for one model; 0 or absent
+// keeps the default.
+export type ModelParam = {
+  provider: string;
+  model: string;
+  contextWindow?: number;
+  compactPct?: number;
+  updatedBy?: string;
+  updatedAt?: string;
+};
+
+export type ModelParamList = { defaultWindow: number; defaultCompactPct: number; params: ModelParam[] };
 
 export type CustomModelInfo = {
   id: string;
@@ -333,7 +410,9 @@ type StreamEvent = {
   // "usage" reports one model call's tokens and cost as the call finishes.
   // "heartbeat" says what the turn is doing while nothing else happens.
   // "done" / "error" end the turn, with the reason.
-  type: "snapshot" | "delta" | "done" | "error" | "tool" | "notice" | "usage" | "heartbeat";
+  // "compaction" reports a context compaction starting and ending.
+  type: "snapshot" | "delta" | "done" | "error" | "tool" | "notice" | "usage" | "heartbeat" | "compaction";
+  compaction?: CompactionReport;
   usage?: CallUsage;
   usages?: CallUsage[];
   activity?: ActivityItem[];
@@ -629,6 +708,34 @@ export class PigoAPI {
     return { sandbox: health.sandbox?.tools ?? [], extensions: health.extensions?.tools ?? [] };
   }
 
+  async modelParams(): Promise<ModelParamList> {
+    return this.request<ModelParamList>("/api/model-params", { headers: this.headers() });
+  }
+
+  async putModelParam(param: ModelParam): Promise<ModelParamList> {
+    return this.request<ModelParamList>("/api/admin/model-params", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(param),
+    });
+  }
+
+  // The row is named in the query string, as for prices.
+  async deleteModelParam(provider: string, model: string): Promise<ModelParamList> {
+    return this.request<ModelParamList>(`/api/admin/model-params?${new URLSearchParams({ provider, model })}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  async putContextDefaults(defaultWindow: number, defaultCompactPct: number): Promise<ModelParamList> {
+    return this.request<ModelParamList>("/api/admin/model-params/defaults", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ defaultWindow, defaultCompactPct }),
+    });
+  }
+
   async prices(): Promise<PriceList> {
     return this.request<PriceList>("/api/prices", { headers: this.headers() });
   }
@@ -651,6 +758,13 @@ export class PigoAPI {
 
   async usage(query: UsageQuery, admin = false): Promise<UsageReport> {
     return this.request<UsageReport>(`${admin ? "/api/admin/usage" : "/api/usage"}?${usageParams(query)}`, {
+      headers: this.headers(),
+    });
+  }
+
+  async usageCalls(query: UsageQuery, filter: CallsFilter, admin = false): Promise<CallsPage> {
+    const params = usageParams({ ...query, modelKey: filter.modelKey, kind: filter.kind, page: String(filter.page), size: String(filter.size) });
+    return this.request<CallsPage>(`${admin ? "/api/admin/usage/calls" : "/api/usage/calls"}?${params}`, {
       headers: this.headers(),
     });
   }
@@ -829,6 +943,11 @@ export class PigoAPI {
             break;
           case "notice":
             handlers.onNotice?.(event.text ?? "");
+            break;
+          case "compaction":
+            ({ items: activity, text } = foldActivity(activity, text, event));
+            handlers.onActivity?.(activity);
+            yield text;
             break;
           case "tool": {
             ({ items: activity, text } = foldActivity(activity, text, event));

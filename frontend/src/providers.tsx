@@ -1,35 +1,161 @@
-// The Provider panel: one table for everything that makes an endpoint usable —
-// its address, and the credentials at each tier.
+// The 服务商 (provider) panel: one row per endpoint a model can run on — its
+// address, and the API keys at each tier. The row's header says at a glance
+// whether it can be used and with whose key; the keys, the address and the
+// endpoint's settings open below it.
 //
-// This replaces the earlier split between "我的 API Key" and "公共 API Key",
-// which were the same concept filed under two owners and therefore sat in two
-// places in the navigation. A user who wanted to use DeepSeek had to visit one
-// panel for the key and another for the model, and had nowhere at all to put an
-// address. Here a provider is one row, and who owns which key is a property of
-// that row rather than a reason to split the page.
-//
-// The precedence a run actually applies — a user's own key, then the shared
-// pool, then the process environment — is shown on the row instead of being
-// described in prose, because it is the thing people get wrong.
+// A run uses the user's own key first, then the shared (公共) one; a provider
+// with neither cannot be used — the server's environment is not consulted.
 import { useCallback, useEffect, useState } from "react";
 import type { CredentialList, CustomModelInfo, CustomProvider, PigoAPI, ProviderInfo } from "./api";
 import { PanelHeading, errorText, usePanelMessage } from "./panel";
 import { navigate } from "./route";
 
-// tierLabel names the credential tiers in the order the server applies them.
-const tiers = [
-  { key: "user", label: "我的 Key" },
-  { key: "public", label: "公共" },
-] as const;
+// KeyStatus is the row's one-line answer to "can I use this, and on whose key".
+function KeyStatus({ info, userHint, publicHint }: { info: ProviderInfo; userHint?: string; publicHint?: string }) {
+  if (info.source === "user") return <span className="key-status ok">我的 Key {userHint}</span>;
+  if (info.source === "public") return <span className="key-status ok">公共 Key{publicHint ? ` ${publicHint}` : ""}</span>;
+  return <span className="key-status missing">未配置 Key</span>;
+}
 
-// ProviderRow shows one endpoint: which tier is in effect, the address when it
-// is a custom one, and the controls to change either.
+// KeyField sets or clears one tier's key.
+function KeyField({
+  label,
+  hint,
+  note,
+  placeholder,
+  onSave,
+  onDelete,
+}: {
+  label: string;
+  hint?: string;
+  note?: string;
+  placeholder: string;
+  onSave(key: string): void;
+  onDelete(): void;
+}) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="key-field">
+      <div className="key-field-label">
+        <strong>{label}</strong>
+        <span>{hint ? `已保存 ${hint}` : "未设置"}</span>
+        {note && <small>{note}</small>}
+      </div>
+      <input
+        className="settings-input"
+        type="password"
+        autoComplete="off"
+        placeholder={hint ? "输入新值以替换" : placeholder}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+      />
+      <div className="context-editor-actions">
+        <button
+          type="button"
+          className="primary-button"
+          disabled={!value.trim()}
+          onClick={() => {
+            onSave(value.trim());
+            setValue("");
+          }}
+        >
+          保存
+        </button>
+        {hint && (
+          <button type="button" className="ghost-button danger-button" onClick={onDelete}>
+            删除
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// EndpointForm edits (or creates) a custom endpoint.
+function EndpointForm({
+  initial,
+  submitLabel,
+  renaming,
+  onSubmit,
+  onCancel,
+}: {
+  initial: CustomProvider;
+  submitLabel: string;
+  // renaming: editing an existing endpoint, whose name change moves its keys,
+  // models, prices and sessions along.
+  renaming?: string;
+  onSubmit(next: CustomProvider): Promise<boolean>;
+  onCancel?(): void;
+}) {
+  const [draft, setDraft] = useState<CustomProvider>(initial);
+  const renamed = renaming !== undefined && draft.name.trim().toLowerCase() !== renaming;
+  return (
+    <div className="add-model">
+      <div className="add-model-grid">
+        <label>
+          名称
+          <input className="settings-input" placeholder="my-gateway" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+        </label>
+        <label>
+          协议
+          <select
+            className="settings-input settings-select"
+            value={draft.protocol}
+            onChange={(event) =>
+              setDraft({ ...draft, protocol: event.target.value, conversationId: event.target.value === "openai" && draft.conversationId })
+            }
+          >
+            <option value="openai">openai · Chat Completions</option>
+            <option value="anthropic">anthropic · Messages</option>
+          </select>
+        </label>
+        <label className="endpoint-url">
+          Base URL
+          <input className="settings-input" placeholder="http://10.0.0.5:8000/v1" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} />
+        </label>
+      </div>
+      <label className="admin-toggle">
+        <input
+          type="checkbox"
+          checked={!!draft.conversationId}
+          disabled={draft.protocol !== "openai"}
+          onChange={(event) => setDraft({ ...draft, conversationId: event.target.checked })}
+        />
+        <span>请求带会话 ID（conversation_id）· 用于 workbuddy2api 等 CodeBuddy 反代，上游据此复用前缀缓存；仅 openai 协议</span>
+      </label>
+      {renamed && <p className="security-note">改名会一并迁移它的 Key、模型、价格和会话；账单记录保留原名。</p>}
+      <div className="add-model-footer">
+        <span className="credential-note">本地无鉴权的端点（vLLM、LMStudio 等）也要填一个占位 Key，驱动不接受空凭据。</span>
+        <div className="context-editor-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!draft.name.trim() || !draft.baseUrl.trim()}
+            onClick={() =>
+              void onSubmit({ name: draft.name.trim(), protocol: draft.protocol, baseUrl: draft.baseUrl.trim(), conversationId: draft.conversationId })
+            }
+          >
+            {submitLabel}
+          </button>
+          {onCancel && (
+            <button type="button" className="ghost-button" onClick={onCancel}>
+              取消
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ProviderRow is one endpoint: its status in the header, the rest below.
 function ProviderRow({
   info,
   isAdmin,
   userHint,
   publicHint,
   modelCount,
+  keysEnabled,
   onSaveKey,
   onDeleteKey,
   onRemoveProvider,
@@ -40,6 +166,7 @@ function ProviderRow({
   userHint?: string;
   publicHint?: string;
   modelCount: number;
+  keysEnabled: boolean;
   onSaveKey(scope: "user" | "public", key: string): void;
   onDeleteKey(scope: "user" | "public"): void;
   onRemoveProvider(): void;
@@ -47,9 +174,6 @@ function ProviderRow({
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<CustomProvider>({ name: "", protocol: "openai", baseUrl: "", conversationId: false });
-  const [userKey, setUserKey] = useState("");
-  const [publicKey, setPublicKey] = useState("");
 
   return (
     <li className={info.source === "none" ? "provider-row unconfigured" : "provider-row"}>
@@ -58,191 +182,89 @@ function ProviderRow({
           {info.name}
           {info.custom && <em className="admin-badge">自定义</em>}
         </span>
-        <span className="provider-tiers">
-          {tiers.map((tier) => (
-            <em key={tier.key} className={info.source === tier.key ? "tier active" : "tier"}>
-              {info.source === tier.key ? "●" : "○"} {tier.label}
-            </em>
-          ))}
+        <span className="provider-endpoint-short" title={info.custom ? info.baseUrl : undefined}>
+          {info.custom ? `${info.protocol} · ${info.baseUrl}${info.conversationId ? " · 带会话 ID" : ""}` : "内置"}
         </span>
+        <span className="provider-model-count">{modelCount > 0 ? `${modelCount} 个模型` : "无模型"}</span>
+        <KeyStatus info={info} userHint={userHint} publicHint={publicHint} />
         <span className="provider-caret">{open ? "▾" : "▸"}</span>
       </button>
 
       {open && (
-        <div className="provider-detail">
-          {info.custom && editing ? (
-            <div className="provider-edit">
-              <label className="field-label" htmlFor={`edit-name-${info.name}`}>名称</label>
-              <input
-                id={`edit-name-${info.name}`}
-                className="settings-input"
-                value={draft.name}
-                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
-              />
-              <label className="field-label" htmlFor={`edit-protocol-${info.name}`}>协议</label>
-              <select
-                id={`edit-protocol-${info.name}`}
-                className="settings-input settings-select"
-                value={draft.protocol}
-                onChange={(event) =>
-                  setDraft({
-                    ...draft,
-                    protocol: event.target.value,
-                    conversationId: event.target.value === "openai" && draft.conversationId,
-                  })
-                }
-              >
-                <option value="openai">openai（Chat Completions 兼容）</option>
-                <option value="anthropic">anthropic（Messages 兼容）</option>
-              </select>
-              <label className="field-label" htmlFor={`edit-url-${info.name}`}>Base URL</label>
-              <input
-                id={`edit-url-${info.name}`}
-                className="settings-input"
-                value={draft.baseUrl}
-                onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
-              />
-              <label className="admin-toggle">
-                <input
-                  type="checkbox"
-                  checked={!!draft.conversationId}
-                  disabled={draft.protocol !== "openai"}
-                  onChange={(event) => setDraft({ ...draft, conversationId: event.target.checked })}
+        <div className="provider-body">
+          {(keysEnabled || isAdmin) && (
+            <div className="key-grid">
+              {keysEnabled && (
+                <KeyField
+                  label="我的 Key"
+                  hint={userHint}
+                  note="只有你用，优先于公共 Key"
+                  placeholder="sk-..."
+                  onSave={(key) => onSaveKey("user", key)}
+                  onDelete={() => onDeleteKey("user")}
                 />
-                <span>请求带会话 ID（conversation_id）· 用于 workbuddy2api 等 CodeBuddy 反代，上游据此复用前缀缓存；仅 openai 协议</span>
-              </label>
-              {draft.name.trim().toLowerCase() !== info.name && (
-                <p className="security-note">
-                  改名会一并迁移它的 Key、模型、价格和会话；账单记录保留原名。
-                </p>
               )}
-              <div className="provider-key-row">
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={!draft.name.trim() || !draft.baseUrl.trim()}
-                  onClick={() =>
-                    void onEditProvider({
-                      name: draft.name.trim(),
-                      protocol: draft.protocol,
-                      baseUrl: draft.baseUrl.trim(),
-                      conversationId: draft.conversationId,
-                    }).then((ok) => ok && setEditing(false))
-                  }
-                >
-                  保存
-                </button>
-                <button type="button" className="ghost-button" onClick={() => setEditing(false)}>
-                  取消
-                </button>
-              </div>
-            </div>
-          ) : info.custom ? (
-            <p className="provider-endpoint">
-              <code>{info.protocol}</code> · <code>{info.baseUrl}</code>
-              {info.conversationId && " · 带会话 ID"}
               {isAdmin && (
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => {
-                    setDraft({
-                      name: info.name,
-                      protocol: info.protocol ?? "openai",
-                      baseUrl: info.baseUrl ?? "",
-                      conversationId: !!info.conversationId,
-                    });
-                    setEditing(true);
-                  }}
-                >
-                  编辑
+                <KeyField
+                  label="公共 Key"
+                  hint={publicHint}
+                  note="所有用户共用，费用由平台承担"
+                  placeholder="所有用户共用"
+                  onSave={(key) => onSaveKey("public", key)}
+                  onDelete={() => onDeleteKey("public")}
+                />
+              )}
+            </div>
+          )}
+
+          {info.custom && editing && (
+            <EndpointForm
+              initial={{
+                name: info.name,
+                protocol: info.protocol ?? "openai",
+                baseUrl: info.baseUrl ?? "",
+                conversationId: !!info.conversationId,
+              }}
+              submitLabel="保存端点"
+              renaming={info.name}
+              onSubmit={(next) =>
+                onEditProvider(next).then((ok) => {
+                  if (ok) setEditing(false);
+                  return ok;
+                })
+              }
+              onCancel={() => setEditing(false)}
+            />
+          )}
+          {!info.custom && <p className="provider-note">内置服务商，地址固定；只使用这里配置的 Key，不读取服务端环境变量。</p>}
+
+          {/* A provider on its own runs nothing: a model has to name it. */}
+          <div className="provider-footer">
+            <span>
+              {modelCount > 0 ? `${modelCount} 个模型使用此服务商` : "还没有模型使用它 —— 服务商只提供地址和 Key，还需要添加模型。"}
+            </span>
+            <div className="context-editor-actions">
+              <button type="button" className="ghost-button" onClick={() => navigate("/settings/models")}>
+                {modelCount > 0 ? "管理模型" : "去添加模型"}
+              </button>
+              {isAdmin && info.custom && !editing && (
+                <button type="button" className="ghost-button" onClick={() => setEditing(true)}>
+                  编辑端点
                 </button>
               )}
-            </p>
-          ) : (
-            <p className="provider-endpoint">
-              内置 · 需要在这里配置 Key 才能使用（不读取服务端环境变量）
-            </p>
-          )}
-
-          <label className="field-label">我的 Key{userHint ? ` · ${userHint}` : ""}</label>
-          <div className="provider-key-row">
-            <input
-              className="settings-input"
-              type="password"
-              autoComplete="off"
-              placeholder={userHint ? "输入新值以替换" : "sk-..."}
-              value={userKey}
-              onChange={(event) => setUserKey(event.target.value)}
-            />
-            <button
-              type="button"
-              className="ghost-button"
-              disabled={!userKey.trim()}
-              onClick={() => {
-                onSaveKey("user", userKey.trim());
-                setUserKey("");
-              }}
-            >
-              保存
-            </button>
-            {userHint && (
-              <button type="button" className="ghost-button danger-button" onClick={() => onDeleteKey("user")}>
-                删除
-              </button>
-            )}
-          </div>
-
-          {isAdmin && (
-            <>
-              <label className="field-label">公共 Key{publicHint ? ` · ${publicHint}` : ""}</label>
-              <div className="provider-key-row">
-                <input
-                  className="settings-input"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={publicHint ? "输入新值以替换" : "所有用户共用"}
-                  value={publicKey}
-                  onChange={(event) => setPublicKey(event.target.value)}
-                />
+              {isAdmin && info.custom && (
                 <button
                   type="button"
-                  className="ghost-button"
-                  disabled={!publicKey.trim()}
+                  className="ghost-button danger-button"
                   onClick={() => {
-                    onSaveKey("public", publicKey.trim());
-                    setPublicKey("");
+                    if (window.confirm(`删除服务商 ${info.name}？它的 Key 会一并删除，使用它的模型将不可用。`)) onRemoveProvider();
                   }}
                 >
-                  保存
+                  删除服务商
                 </button>
-                {publicHint && (
-                  <button type="button" className="ghost-button danger-button" onClick={() => onDeleteKey("public")}>
-                    删除
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-
-          {/* A provider on its own runs nothing: it supplies an address and a
-              key, and a model has to name it. Saying so here is the difference
-              between "I configured it and nothing happened" and knowing the
-              next step. */}
-          <p className="provider-models">
-            {modelCount > 0
-              ? `${modelCount} 个模型使用此 Provider`
-              : "还没有模型使用它 —— Provider 只提供地址和凭据，需要再添加一个模型。"}
-            <button type="button" className="ghost-button" onClick={() => navigate("/settings/models")}>
-              {modelCount > 0 ? "管理模型" : "去添加模型"}
-            </button>
-          </p>
-
-          {isAdmin && info.custom && (
-            <button type="button" className="ghost-button danger-button provider-remove" onClick={onRemoveProvider}>
-              删除此 Provider
-            </button>
-          )}
+              )}
+            </div>
+          </div>
         </div>
       )}
     </li>
@@ -257,122 +279,78 @@ function AddProvider({
   isAdmin,
   onPick,
   onCreate,
+  onClose,
 }: {
   builtins: ProviderInfo[];
   isAdmin: boolean;
   onPick(name: string): void;
-  onCreate(next: CustomProvider): void;
+  onCreate(next: CustomProvider): Promise<boolean>;
+  onClose(): void;
 }) {
   const [mode, setMode] = useState<"builtin" | "custom">("builtin");
   const [picked, setPicked] = useState("");
-  const [name, setName] = useState("");
-  const [protocol, setProtocol] = useState("openai");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [conversationId, setConversationId] = useState(false);
 
   return (
-    <div className="provider-add">
+    <div className="provider-add-panel">
       <div className="provider-add-tabs">
-        <button
-          type="button"
-          className={mode === "builtin" ? "ghost-button active" : "ghost-button"}
-          onClick={() => setMode("builtin")}
-        >
-          内置 Provider
+        <button type="button" className={mode === "builtin" ? "ghost-button active" : "ghost-button"} onClick={() => setMode("builtin")}>
+          内置服务商
         </button>
         {isAdmin && (
-          <button
-            type="button"
-            className={mode === "custom" ? "ghost-button active" : "ghost-button"}
-            onClick={() => setMode("custom")}
-          >
+          <button type="button" className={mode === "custom" ? "ghost-button active" : "ghost-button"} onClick={() => setMode("custom")}>
             自定义端点
           </button>
         )}
       </div>
 
       {mode === "builtin" ? (
-        <>
-          <select
-            className="settings-input settings-select"
-            aria-label="选择内置 Provider"
-            value={picked}
-            onChange={(event) => setPicked(event.target.value)}
-          >
-            <option value="">选择一个…</option>
-            {builtins.map((item) => (
-              <option key={item.name} value={item.name}>{item.name}</option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="primary-button full-button"
-            disabled={!picked}
-            onClick={() => {
-              onPick(picked);
-              setPicked("");
-            }}
-          >
-            添加到列表
-          </button>
-        </>
+        <div className="add-model">
+          <div className="provider-pick">
+            <select
+              className="settings-input settings-select"
+              aria-label="选择内置服务商"
+              value={picked}
+              onChange={(event) => setPicked(event.target.value)}
+            >
+              <option value="">{builtins.length > 0 ? "选择一个内置服务商…" : "内置服务商都已在列表中"}</option>
+              {builtins.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+            <div className="context-editor-actions">
+              <button
+                type="button"
+                className="primary-button"
+                disabled={!picked}
+                onClick={() => {
+                  onPick(picked);
+                  setPicked("");
+                  onClose();
+                }}
+              >
+                加入列表
+              </button>
+              <button type="button" className="ghost-button" onClick={onClose}>
+                取消
+              </button>
+            </div>
+          </div>
+          <p className="credential-note">加入后在它的行里填 Key 即可使用；没有 Key 的内置服务商刷新后不再显示。</p>
+        </div>
       ) : (
-        <>
-          <label className="field-label" htmlFor="custom-name">名称</label>
-          <input
-            id="custom-name"
-            className="settings-input"
-            placeholder="my-gateway"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-          <label className="field-label" htmlFor="custom-protocol">协议</label>
-          <select
-            id="custom-protocol"
-            className="settings-input settings-select"
-            value={protocol}
-            onChange={(event) => {
-              setProtocol(event.target.value);
-              if (event.target.value !== "openai") setConversationId(false);
-            }}
-          >
-            <option value="openai">openai（Chat Completions 兼容）</option>
-            <option value="anthropic">anthropic（Messages 兼容）</option>
-          </select>
-          <label className="field-label" htmlFor="custom-url">Base URL</label>
-          <input
-            id="custom-url"
-            className="settings-input"
-            placeholder="http://10.0.0.5:8000/v1"
-            value={baseUrl}
-            onChange={(event) => setBaseUrl(event.target.value)}
-          />
-          <label className="admin-toggle">
-            <input
-              type="checkbox"
-              checked={conversationId}
-              disabled={protocol !== "openai"}
-              onChange={(event) => setConversationId(event.target.checked)}
-            />
-            <span>请求带会话 ID（conversation_id）· 用于 workbuddy2api 等 CodeBuddy 反代，上游据此复用前缀缓存；仅 openai 协议</span>
-          </label>
-          <button
-            type="button"
-            className="primary-button full-button"
-            disabled={!name.trim() || !baseUrl.trim()}
-            onClick={() => {
-              onCreate({ name: name.trim(), protocol, baseUrl: baseUrl.trim(), conversationId });
-              setName("");
-              setBaseUrl("");
-              setConversationId(false);
-            }}
-          >
-            添加端点
-          </button>
-          <p className="security-note">
-            本地无鉴权的端点（vLLM / LMStudio 等）仍需在上面填一个占位 Key，驱动会拒绝空凭据。
-          </p>
-        </>
+        <EndpointForm
+          initial={{ name: "", protocol: "openai", baseUrl: "", conversationId: false }}
+          submitLabel="添加端点"
+          onSubmit={(next) =>
+            onCreate(next).then((ok) => {
+              if (ok) onClose();
+              return ok;
+            })
+          }
+          onCancel={onClose}
+        />
       )}
     </div>
   );
@@ -394,18 +372,15 @@ export function Providers({
   const [mine, setMine] = useState<CredentialList | null>(null);
   const [shared, setShared] = useState<CredentialList | null>(null);
   const [models, setModels] = useState<CustomModelInfo[]>([]);
-  // shown holds the built-ins the user explicitly added to the table this
+  // shown holds the built-ins the user explicitly added to the list this
   // visit; a built-in with no key anywhere is otherwise hidden, since listing
-  // all 38 would bury the handful that matter.
+  // all of them would bury the handful that matter.
   const [shown, setShown] = useState<string[]>([]);
+  const [adding, setAdding] = useState(false);
   const { report, view } = usePanelMessage();
 
   const refresh = useCallback(async () => {
-    const [nextProviders, nextMine, nextModels] = await Promise.all([
-      api.providers(),
-      api.credentials(),
-      api.customModels(),
-    ]);
+    const [nextProviders, nextMine, nextModels] = await Promise.all([api.providers(), api.credentials(), api.customModels()]);
     setProviders(nextProviders);
     setMine(nextMine);
     setModels(isAdmin ? nextModels.concat(await api.adminModels()) : nextModels);
@@ -436,23 +411,51 @@ export function Providers({
   }
 
   // A row is worth showing when something is configured for it, when it is a
-  // custom endpoint, or when the user just picked it.
-  const rows = providers.filter(
-    (item) => item.custom || item.source !== "none" || shown.includes(item.name),
-  );
+  // custom endpoint, or when the user just picked it. Usable ones come first.
+  const rows = providers
+    .filter((item) => item.custom || item.source !== "none" || shown.includes(item.name))
+    .sort((a, b) => Number(a.source === "none") - Number(b.source === "none"));
   const addable = providers.filter((item) => !rows.includes(item) && !item.custom);
-  const disabled = mine && !mine.enabled;
+  const keysEnabled = !mine || mine.enabled;
+  const usable = rows.filter((item) => item.source !== "none").length;
 
   return (
     <section className="settings-section">
       <PanelHeading
-        title="Provider"
-        hint="模型从这里取地址和凭据。同一个 Provider 上，我的 Key 优先于公共；两者都没有时不可用。"
-        icon="PRV"
+        title="模型服务商"
+        hint="模型从服务商取地址和 Key。同一个服务商上，我的 Key 优先于公共 Key；两者都没有时不可用。"
+        icon="商"
       />
-      {disabled && <p className="security-note">{mine?.reason}</p>}
+      {!keysEnabled && <p className="security-note">{mine?.reason}</p>}
 
-      {rows.length > 0 && (
+      <div className="model-toolbar">
+        <h4>
+          服务商 <span className="credential-note">{usable} / {rows.length} 可用</span>
+        </h4>
+        {!adding && (
+          <button type="button" className="primary-button" onClick={() => setAdding(true)}>
+            + 添加服务商
+          </button>
+        )}
+      </div>
+
+      {adding && (
+        <AddProvider
+          builtins={addable}
+          isAdmin={isAdmin}
+          onPick={(name) => setShown([...shown, name])}
+          onCreate={(next) =>
+            act(async () => {
+              await api.putAdminProvider(next);
+              setShown([...shown, next.name]);
+              return `已添加端点 ${next.name}`;
+            })
+          }
+          onClose={() => setAdding(false)}
+        />
+      )}
+
+      {rows.length > 0 ? (
         <ul className="provider-list">
           {rows.map((info) => (
             <ProviderRow
@@ -462,6 +465,7 @@ export function Providers({
               userHint={hintFor(mine, info.name)}
               publicHint={hintFor(shared, info.name)}
               modelCount={models.filter((item) => item.provider === info.name).length}
+              keysEnabled={keysEnabled}
               onSaveKey={(scope, key) =>
                 void act(async () => {
                   if (scope === "user") await api.setCredential(info.name, key);
@@ -486,26 +490,15 @@ export function Providers({
               onRemoveProvider={() =>
                 void act(async () => {
                   await api.deleteAdminProvider(info.name);
-                  return `已删除端点 ${info.name}`;
+                  return `已删除服务商 ${info.name}`;
                 })
               }
             />
           ))}
         </ul>
+      ) : (
+        <p className="credential-note">还没有可用的服务商，点「+ 添加服务商」开始。</p>
       )}
-
-      <AddProvider
-        builtins={addable}
-        isAdmin={isAdmin}
-        onPick={(name) => setShown([...shown, name])}
-        onCreate={(next) =>
-          void act(async () => {
-            await api.putAdminProvider(next);
-            setShown([...shown, next.name]);
-            return `已添加端点 ${next.name}`;
-          })
-        }
-      />
       {view}
     </section>
   );

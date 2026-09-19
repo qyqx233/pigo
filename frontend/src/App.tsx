@@ -162,6 +162,13 @@ function toThreadMessages(messages: HistoryMessage[]): ThreadMessageLike[] {
         t.items.push({ kind: "tool", tool: message.toolName, id: message.toolCallId, detail: message.detail, status: "running" });
         break;
       }
+      case "compaction": {
+        // A compaction follows what the turn wrote before it, as it does live.
+        const t = current(message);
+        narrate(t);
+        t.items.push({ kind: "compaction", status: "ok", compaction: message.compaction, summary: message.content });
+        break;
+      }
       case "toolResult": {
         const t = current(message);
         let index = t.items.length - 1;
@@ -832,7 +839,7 @@ function ModelPicker() {
         <div className="model-menu" role="listbox" aria-label="切换模型">
           <input
             className="settings-input model-menu-search"
-            placeholder="搜索模型 / provider"
+            placeholder="搜索模型 / 服务商"
             autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -1006,7 +1013,7 @@ const settingsGroups: SettingsGroup[] = [
     title: "配置",
     tabs: [
       { key: "session", label: "会话" },
-      { key: "providers", label: "Provider" },
+      { key: "providers", label: "服务商" },
       { key: "models", label: "模型" },
       { key: "workspace", label: "工作区" },
       { key: "usage", label: "用量" },
@@ -1020,7 +1027,6 @@ const settingsGroups: SettingsGroup[] = [
     tabs: [
       { key: "admin", label: "部署" },
       { key: "admin-users", label: "用户" },
-      { key: "admin-usage", label: "全员用量" },
     ],
   },
 ];
@@ -1119,7 +1125,10 @@ function SettingsPage({ tab }: { tab: string }) {
 
   const visibleGroups = settingsGroups.filter((group) => !group.adminOnly || user?.admin);
   const visibleKeys = visibleGroups.flatMap((group) => group.tabs.map((item) => item.key));
-  const active = visibleKeys.includes(tab) ? tab : "session";
+  // 全员用量 is the usage page with its scope switched to everyone; it keeps
+  // its own route so the switch survives a reload.
+  const allUsage = tab === "admin-usage" && !!user?.admin;
+  const active = allUsage ? "usage" : visibleKeys.includes(tab) ? tab : "session";
 
   return (
     <div className="settings-page">
@@ -1200,6 +1209,7 @@ function SettingsPage({ tab }: { tab: string }) {
           <Models
             api={api}
             providers={providers}
+            models={datalistModels}
             isAdmin={!!user?.admin}
             onChanged={() => void reloadModels()}
           />
@@ -1210,10 +1220,9 @@ function SettingsPage({ tab }: { tab: string }) {
         )}
         {active === "workspace" && <WorkspaceFiles />}
 
-        {user?.admin && active === "admin" && <AdminSettings api={api} />}
+        {user?.admin && active === "admin" && <AdminSettings api={api} models={models} />}
         {user?.admin && active === "admin-users" && <AdminUsers api={api} />}
-        {user?.admin && active === "admin-usage" && <UsagePanel api={api} admin />}
-        {active === "usage" && <UsagePanel api={api} />}
+        {active === "usage" && <UsagePanel key={allUsage ? "all" : "mine"} api={api} canSeeAll={!!user?.admin} initialAll={allUsage} />}
         {active === "prices" && (
           <Prices api={api} isAdmin={!!user?.admin} providers={providers} models={datalistModels} />
         )}
@@ -1232,7 +1241,7 @@ function SettingsPage({ tab }: { tab: string }) {
             <div className="metric"><strong>{commands.length}</strong><span>命令</span></div>
             </div>
             <div className="capability-list">
-            <div><span>Provider</span><strong>{session?.provider ?? "—"}</strong></div>
+            <div><span>服务商</span><strong>{session?.provider ?? "—"}</strong></div>
             <div><span>Web 暂不可用命令</span><strong>{unavailableCount}</strong></div>
             <div><span>Session</span><code>{session ? session.id.slice(0, 12) : "—"}</code></div>
             <div><span>Sandbox</span><strong>{session?.sandbox ?? "—"}{session?.alive ? " · 运行中" : ""}</strong></div>
@@ -1498,7 +1507,7 @@ function Thread() {
               </ThreadPrimitive.Suggestion>
               <ThreadPrimitive.Suggestion className="starter-card" prompt="/models" send>
                 <span className="starter-symbol">AI</span>
-                <span><strong>查看模型</strong><small>列出当前支持的模型与 Provider</small></span>
+                <span><strong>查看模型</strong><small>列出当前支持的模型与服务商</small></span>
                 <i>↗</i>
               </ThreadPrimitive.Suggestion>
             </div>
@@ -1608,7 +1617,7 @@ function UserMessage() {
 }
 
 function AssistantMessage() {
-  const { error } = usePigo();
+  const { error, session } = usePigo();
   const custom = useAuiState(
     (state) => state.message.metadata?.custom as { usage?: TurnUsage; end?: TurnEnd } | undefined,
   );
@@ -1633,7 +1642,7 @@ function AssistantMessage() {
           </MessagePrimitive.Error>
           {note && <p className="turn-note">{note}</p>}
         </div>
-        {usage && <UsageLine usage={usage} />}
+        {usage && <UsageLine usage={usage} context={session?.context} />}
         {end && isLast && !running && continuableReasons.has(end.reason) && (
           <button type="button" className="ghost-button continue-button" onClick={sendContinue}>
             继续
