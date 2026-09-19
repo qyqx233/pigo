@@ -264,12 +264,14 @@ func (d *responsesDriver) mapResponse(resp *responses.Response) agentcore.Assist
 	if sawToolCall {
 		msg.StopReason = agentcore.StopReasonToolUse
 	}
-	if resp.Usage.InputTokens != 0 || resp.Usage.OutputTokens != 0 {
-		msg.Usage = &agentcore.Usage{
-			InputTokens:  int(resp.Usage.InputTokens),
-			OutputTokens: int(resp.Usage.OutputTokens),
-		}
-	}
+	// The Responses API is an inclusive dialect: input_tokens already contains
+	// input_tokens_details.cached_tokens (usage.go).
+	msg.Usage = usagePtr(inclusiveUsage(
+		int(resp.Usage.InputTokens),
+		int(resp.Usage.InputTokensDetails.CachedTokens),
+		int(resp.Usage.OutputTokens),
+		int(resp.Usage.OutputTokensDetails.ReasoningTokens),
+	))
 	return msg
 }
 

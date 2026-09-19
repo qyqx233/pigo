@@ -187,3 +187,21 @@ func TestDefaultCompactionSettings(t *testing.T) {
 		t.Fatal("default settings should be enabled")
 	}
 }
+
+// TestContextTokensIncludeCache pins the property compaction depends on: the
+// context size is the same whether a provider reports its prompt as one total
+// (transcripts written before cache tracking) or split into uncached input and
+// cache hits (everything since). Dropping the cache from the sum would make a
+// well-cached conversation look short and delay compaction until the context
+// window overflows.
+func TestContextTokensIncludeCache(t *testing.T) {
+	legacy := agentcore.Usage{InputTokens: 973, OutputTokens: 1}
+	split := agentcore.Usage{InputTokens: 205, CacheReadTokens: 768, OutputTokens: 1}
+	if calculateContextTokens(legacy) != calculateContextTokens(split) {
+		t.Fatalf("legacy %d != split %d", calculateContextTokens(legacy), calculateContextTokens(split))
+	}
+	withWrite := agentcore.Usage{InputTokens: 120, CacheReadTokens: 2000, CacheWriteTokens: 300, OutputTokens: 42}
+	if got := calculateContextTokens(withWrite); got != 2462 {
+		t.Errorf("context = %d, want 2462 (input + cache read + cache write + output)", got)
+	}
+}

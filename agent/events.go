@@ -72,9 +72,19 @@ type ToolExecutionEndEvent struct {
 }
 
 // Usage is provider-reported token accounting for one assistant message.
+// Usage is token accounting for one assistant message. The four counts never
+// overlap: InputTokens is input that missed the prompt cache, and cache hits
+// and cache writes are reported separately. (Before cache tracking, OpenAI-style
+// providers reported InputTokens as a total that included cache hits.)
 type Usage struct {
-	InputTokens  int `json:"inputTokens"`
-	OutputTokens int `json:"outputTokens"`
+	InputTokens      int `json:"inputTokens"`
+	OutputTokens     int `json:"outputTokens"`
+	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
+	// ReasoningTokens is the part of OutputTokens spent on reasoning.
+	ReasoningTokens int `json:"reasoningTokens,omitempty"`
+	// UpstreamCostUSD is the provider-reported charge, when it reports one.
+	UpstreamCostUSD *float64 `json:"upstreamCostUsd,omitempty"`
 }
 
 // UsageEvent carries token accounting for one completed assistant message.
@@ -131,8 +141,12 @@ func (m *eventMapper) handle(event agentcore.AgentEvent) {
 		m.emitEvent(MessageEndEvent{Text: agentcore.ContentToText(message.Content)})
 		if message.Usage != nil {
 			m.emitEvent(UsageEvent{Usage: Usage{
-				InputTokens:  message.Usage.InputTokens,
-				OutputTokens: message.Usage.OutputTokens,
+				InputTokens:      message.Usage.InputTokens,
+				OutputTokens:     message.Usage.OutputTokens,
+				CacheReadTokens:  message.Usage.CacheReadTokens,
+				CacheWriteTokens: message.Usage.CacheWriteTokens,
+				ReasoningTokens:  message.Usage.ReasoningTokens,
+				UpstreamCostUSD:  message.Usage.UpstreamCostUSD,
 			}})
 		}
 		m.previousText = ""

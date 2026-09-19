@@ -48,9 +48,8 @@ type OpenAIDecoder struct {
 
 	responseID    string
 	responseModel string
-	inputTokens   int
-	outputTokens  int
-	stopReason    string // mapped pigo stop reason (empty until finish_reason)
+	usage         agentcore.Usage // converted from the wire's usage block (usage.go)
+	stopReason    string          // mapped pigo stop reason (empty until finish_reason)
 	done          bool
 }
 
@@ -77,10 +76,7 @@ type openaiChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
+	Usage *openaiUsage `json:"usage"`
 	// Some gateways surface an error object inline on the stream.
 	Error *struct {
 		Message string `json:"message"`
@@ -117,8 +113,7 @@ func (d *OpenAIDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 		d.responseModel = chunk.Model
 	}
 	if chunk.Usage != nil {
-		d.inputTokens = chunk.Usage.PromptTokens
-		d.outputTokens = chunk.Usage.CompletionTokens
+		d.usage = chunk.Usage.canonical()
 	}
 
 	var events []StreamEvent
@@ -197,9 +192,7 @@ func (d *OpenAIDecoder) partial() agentcore.AssistantMessage {
 		ResponseID:    d.responseID,
 		ResponseModel: d.responseModel,
 	}
-	if d.inputTokens != 0 || d.outputTokens != 0 {
-		msg.Usage = &agentcore.Usage{InputTokens: d.inputTokens, OutputTokens: d.outputTokens}
-	}
+	msg.Usage = usagePtr(d.usage)
 	if d.thinking.Len() > 0 {
 		msg.Content = append(msg.Content, agentcore.NewThinkingContent(d.thinking.String()))
 	}

@@ -11,6 +11,17 @@ interactive REPL/TUI.
 
 ## [Unreleased]
 
+### Changed
+- **Token usage now tracks the prompt cache, in pi's shape.** `Usage` gains
+  `CacheReadTokens`, `CacheWriteTokens`, `ReasoningTokens` and
+  `UpstreamCostUSD`, and **`InputTokens` now means input that missed the
+  cache** on every provider. Previously OpenAI-style providers reported a total
+  that included cache hits while Anthropic-style ones did not. Consumers of the
+  public `agent.UsageEvent` and of headless stream-json `inputTokens` that want
+  the whole prompt should add `cacheReadTokens` and `cacheWriteTokens`.
+  Context-size estimation (and so auto-compaction) now counts cache hits, as pi
+  does; transcripts written before this change estimate exactly as before.
+
 ### Added
 - **Tool-level admission control**: `--allowed-tools` / `--disallowed-tools`
   (repeatable, comma-separated, case-insensitive) narrow the tool set handed to

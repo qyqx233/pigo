@@ -86,6 +86,9 @@ func (d *openAICompatDriver) StreamCompletion(ctx context.Context, req Completio
 		return nil, err
 	}
 	body, err := encodeOpenAIRequest(req)
+	if err == nil && d.name == "openrouter" {
+		body, err = withOpenRouterUsageAccounting(body)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: build request body: %w", d.name, err)
 	}
@@ -105,6 +108,18 @@ func (d *openAICompatDriver) StreamCompletion(ctx context.Context, req Completio
 		return httpReq, nil
 	}
 	return StreamRequest(ctx, TransportConfig{NewRequest: newReq, Decoder: NewOpenAIDecoder()})
+}
+
+// withOpenRouterUsageAccounting asks OpenRouter to report what each call cost
+// ("usage": {"include": true}), which it then returns as usage.cost. It is
+// OpenRouter-only: other OpenAI-compatible servers may reject unknown fields.
+func withOpenRouterUsageAccounting(body []byte) ([]byte, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	payload["usage"] = map[string]any{"include": true}
+	return json.Marshal(payload)
 }
 
 // encodeOpenAIRequest serializes a CompletionRequest into an OpenAI Chat

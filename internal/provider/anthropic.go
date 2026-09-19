@@ -52,10 +52,9 @@ type AnthropicDecoder struct {
 
 	responseID    string
 	responseModel string
-	inputTokens   int
-	outputTokens  int
-	stopReason    string // mapped pigo stop reason (empty until message_delta)
-	done          bool   // message_stop / done already emitted
+	usage         anthropicUsage // merged across message_start / message_delta
+	stopReason    string         // mapped pigo stop reason (empty until message_delta)
+	done          bool           // message_stop / done already emitted
 }
 
 // NewAnthropicDecoder builds a fresh decoder for one streamed response.
@@ -106,11 +105,6 @@ type anthropicEvent struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
-}
-
-type anthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
 }
 
 // Decode turns one Anthropic SSE data payload into zero or more StreamEvents.
@@ -166,8 +160,7 @@ func (d *AnthropicDecoder) onMessageStart(ev anthropicEvent) []StreamEvent {
 		d.responseID = ev.Message.ID
 		d.responseModel = ev.Message.Model
 		if ev.Message.Usage != nil {
-			d.inputTokens = ev.Message.Usage.InputTokens
-			d.outputTokens = ev.Message.Usage.OutputTokens
+			d.usage.merge(*ev.Message.Usage)
 		}
 	}
 	return []StreamEvent{StreamStartEvent{Partial: d.partial()}}
@@ -235,13 +228,9 @@ func (d *AnthropicDecoder) onMessageDelta(ev anthropicEvent) []StreamEvent {
 		d.stopReason = mapAnthropicStopReason(ev.Delta.StopReason)
 	}
 	if ev.Usage != nil {
-		// message_delta reports cumulative output tokens (and sometimes input).
-		if ev.Usage.OutputTokens != 0 {
-			d.outputTokens = ev.Usage.OutputTokens
-		}
-		if ev.Usage.InputTokens != 0 {
-			d.inputTokens = ev.Usage.InputTokens
-		}
+		// message_delta reports cumulative output tokens (and sometimes the
+		// input side again); merge never lets a later zero erase a value.
+		d.usage.merge(*ev.Usage)
 	}
 	// No standalone event kind for usage/stop-reason accumulation; the values
 	// surface in the terminal done message.
@@ -282,9 +271,7 @@ func (d *AnthropicDecoder) partial() agentcore.AssistantMessage {
 		ResponseID:    d.responseID,
 		ResponseModel: d.responseModel,
 	}
-	if d.inputTokens != 0 || d.outputTokens != 0 {
-		msg.Usage = &agentcore.Usage{InputTokens: d.inputTokens, OutputTokens: d.outputTokens}
-	}
+	msg.Usage = usagePtr(d.usage.canonical())
 
 	idx := make([]int, len(d.order))
 	copy(idx, d.order)

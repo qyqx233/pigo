@@ -33,10 +33,53 @@ type Message interface {
 // LLM messages.
 type AgentMessage = Message
 
-// Usage reports token accounting for an assistant response.
+// Usage reports token accounting for an assistant response, in pi's shape: the
+// four token counts never overlap, so their sum is the whole request plus
+// response and each can be priced on its own.
+//
+// Providers disagree about what "input" means — OpenAI-style APIs report a total
+// that already includes cache hits, Anthropic reports input without them — so
+// every decoder converts its own wire format into this one before anything
+// downstream sees it. InputTokens is therefore always the input that was NOT
+// served from cache.
 type Usage struct {
-	InputTokens  int `json:"inputTokens"`
+	// InputTokens is input that missed the prompt cache.
+	InputTokens int `json:"inputTokens"`
+	// OutputTokens is everything generated, reasoning included.
 	OutputTokens int `json:"outputTokens"`
+	// CacheReadTokens is input served from the provider's prompt cache.
+	CacheReadTokens int `json:"cacheReadTokens,omitempty"`
+	// CacheWriteTokens is input written into the prompt cache on this request
+	// (reported by Anthropic-style APIs; priced above plain input there).
+	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
+	// ReasoningTokens is the part of OutputTokens spent on reasoning, for
+	// display only: it is already counted in OutputTokens.
+	ReasoningTokens int `json:"reasoningTokens,omitempty"`
+	// UpstreamCostUSD is what the provider says the call cost, when it says so
+	// (OpenRouter does on request). Nil means not reported.
+	UpstreamCostUSD *float64 `json:"upstreamCostUsd,omitempty"`
+	// Anomaly marks a response whose numbers did not add up (a cache count
+	// larger than the input total) and were therefore taken without the usual
+	// subtraction. It lets such calls be found afterwards instead of silently
+	// trusted.
+	Anomaly bool `json:"anomaly,omitempty"`
+}
+
+// TotalInputTokens is the whole prompt as the model saw it, cached or not.
+func (u Usage) TotalInputTokens() int {
+	return u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens
+}
+
+// ContextTokens is the size of the conversation after this response: the full
+// prompt plus what was generated. Compaction uses it to decide when the
+// context is getting full, which is why cache hits must be in it.
+func (u Usage) ContextTokens() int {
+	return u.TotalInputTokens() + u.OutputTokens
+}
+
+// IsZero reports whether the response carried no token accounting at all.
+func (u Usage) IsZero() bool {
+	return u.TotalInputTokens() == 0 && u.OutputTokens == 0
 }
 
 // UserMessage is input from the user. Content is restricted at construction to

@@ -98,10 +98,15 @@ func EstimateTokens(msg agentcore.Message) int {
 }
 
 // calculateContextTokens derives total context tokens from a provider usage
-// block. pigo's Usage only reports input/output, so we sum them (pi additionally
-// folds cache read/write, which pigo does not track).
+// block: input, cache reads, cache writes and output, as pi does. Cache hits are
+// part of the context even though they are billed differently — leaving them
+// out would make a well-cached conversation look short and delay compaction
+// until the window overflows.
+//
+// Transcripts written before cache tracking stored an input total that already
+// included cache hits and no cache fields, so this sum is unchanged for them.
 func calculateContextTokens(u agentcore.Usage) int {
-	return u.InputTokens + u.OutputTokens
+	return u.ContextTokens()
 }
 
 // assistantUsage returns a usable Usage from an assistant message, skipping
