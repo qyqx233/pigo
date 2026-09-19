@@ -15,11 +15,10 @@ import {
 } from "@assistant-ui/react";
 import { AdminSettings, AdminUsers } from "./admin";
 import { Prices, SessionCost, UsageLine, UsagePanel, totalsOf } from "./billing";
-import { ActivityLog } from "./activity";
+import { TurnParts, cutOff, turnContent } from "./activity";
 import { navigate, navigateEvent, parsePath, type Route } from "./route";
 import { Models } from "./models";
 import { Providers } from "./providers";
-import { MarkdownText } from "./markdown";
 import {
   createContext,
   useContext,
@@ -126,16 +125,14 @@ function toThreadMessages(messages: HistoryMessage[]): ThreadMessageLike[] {
   const flush = () => {
     if (!turn) return;
     // A call with no result was cut off with the turn.
-    const items = turn.items.map((item) =>
-      item.kind === "tool" && item.status === "running" ? { ...item, status: "error" as const, text: "未完成" } : item,
-    );
+    const items = cutOff(turn.items);
     const answer = turn.text ?? "";
     if (answer || items.length > 0) {
-      const custom = { ...(items.length > 0 ? { activity: items } : {}), ...(turn.usage ? { usage: turn.usage } : {}) };
+      const custom = turn.usage ? { usage: turn.usage } : {};
       out.push({
         id: turn.id,
         role: "assistant",
-        content: [{ type: "text" as const, text: answer }],
+        content: turnContent(items, answer),
         createdAt: new Date(turn.createdAt),
         status: { type: "complete" as const, reason: "stop" as const },
         metadata: { custom },
@@ -247,13 +244,13 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
         activity = items;
       },
     };
-    const shape = (text: string) => ({
-      content: [{ type: "text" as const, text }],
+    // final: the turn is over, so a call still running was cut off with it.
+    const shape = (text: string, final = false) => ({
+      content: turnContent(final ? cutOff(activity) : activity, text),
       metadata: {
         custom: {
           ...(calls.length > 0 ? { usage: totalsOf(calls) } : {}),
           ...(end ? { end } : {}),
-          ...(activity.length > 0 ? { activity } : {}),
         },
       },
     });
@@ -265,9 +262,9 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
       }
       // Once more, so usage and the ending that arrived with the final text
       // are on the message.
-      yield shape(last);
+      yield shape(last, true);
     } catch (cause) {
-      if (end) yield shape(last);
+      if (end) yield shape(last, true);
       // A turn that ended short (stopped, a limit, an upstream error) says so
       // on its message; the top bar's error is for the connection itself.
       if (!(cause instanceof TurnError)) setError(cause instanceof Error ? cause.message : String(cause));
@@ -1571,9 +1568,8 @@ function UserMessage() {
 function AssistantMessage() {
   const { error } = usePigo();
   const custom = useAuiState(
-    (state) => state.message.metadata?.custom as { usage?: TurnUsage; end?: TurnEnd; activity?: ActivityItem[] } | undefined,
+    (state) => state.message.metadata?.custom as { usage?: TurnUsage; end?: TurnEnd } | undefined,
   );
-  const messageRunning = useAuiState((state) => state.message.status?.type === "running");
   const isLast = useAuiState((state) => state.message.isLast);
   const running = useAuiState((state) => state.thread.isRunning);
   const sendContinue = useSendContinue();
@@ -1589,8 +1585,7 @@ function AssistantMessage() {
       </div>
       <div className="assistant-body">
         <div className="message assistant-message">
-          {custom?.activity && <ActivityLog items={custom.activity} running={messageRunning} />}
-          <MessagePrimitive.Content components={{ Text: MarkdownText }} />
+          <TurnParts />
           <MessagePrimitive.Error>
             <span className="message-error">{end?.message || error || "生成失败，请重试。"}</span>
           </MessagePrimitive.Error>

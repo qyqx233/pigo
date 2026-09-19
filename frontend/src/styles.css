@@ -3087,8 +3087,9 @@ button {
 
 /* --- the activity log -------------------------------------------------------- */
 
+/* A group sits between paragraphs of the answer. */
 .activity {
-  margin: 0 0 12px;
+  margin: 10px 0;
   border: 1px solid #262d39;
   border-radius: 10px;
   background: #0d1016;
@@ -3160,16 +3161,6 @@ button {
   min-width: 0;
 }
 
-.activity-text {
-  color: #7f8796;
-  font-family: inherit;
-}
-
-.activity-text .activity-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .activity-call {
   display: flex;
   gap: 7px;
@@ -3192,6 +3183,15 @@ button {
 .activity-time {
   flex: 0 0 auto;
   margin-left: auto;
+  color: #6b7280;
+}
+
+.activity-head .activity-time {
+  margin-left: auto;
+}
+
+.activity-cut .activity-status,
+.activity-cut .activity-time {
   color: #6b7280;
 }
 
@@ -3249,7 +3249,6 @@ button {
   color: #29332d;
 }
 
-[data-theme="light"] .activity-text,
 [data-theme="light"] .activity-head {
   color: #697587;
 }
