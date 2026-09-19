@@ -31,7 +31,10 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 		return nil
 	}
 	ws := managed.paths.Workspace
-	tools := s.hostTools(managed)
+	tools, err := s.hostTools(managed)
+	if err != nil {
+		return err
+	}
 	prompt, err := runtime.BuildSystemPrompt(runtime.PromptConfig{
 		WorkingDir:        ws,
 		Root:              ws,
@@ -66,9 +69,11 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 	return nil
 }
 
-func (s *apiServer) hostTools(managed *managedSession) []agentcore.AgentTool {
+// hostTools is a session's tool set: the built-ins, then the configured
+// extensions (replacing or adding), then the -tools selection.
+func (s *apiServer) hostTools(managed *managedSession) ([]agentcore.AgentTool, error) {
 	if s.noTools {
-		return nil
+		return nil, nil
 	}
 	ws := managed.paths.Workspace
 	snap := agenttool.NewFileSnapshotRecorder()
@@ -89,11 +94,15 @@ func (s *apiServer) hostTools(managed *managedSession) []agentcore.AgentTool {
 		&agenttool.WebFetchTool{},
 		&agenttool.WebSearchTool{},
 	}
+	tools, err := s.applyExtensions(managed, tools)
+	if err != nil {
+		return nil, err
+	}
 	if !toolsAreAll(s.config.tools) && len(s.toolNames) > 0 {
 		policy := run.NewToolPolicy(s.toolNames, nil)
 		tools = run.ApplyToolPolicy(tools, policy)
 	}
-	return tools
+	return tools, nil
 }
 
 func hasHostBash(tools []agentcore.AgentTool) bool {
@@ -181,7 +190,7 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 			case agentcore.ToolExecutionStartEvent:
 				started[e.ToolCallID] = time.Now()
 				args, _ := e.Args.(json.RawMessage)
-				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "start", ID: e.ToolCallID, Detail: toolDetail(e.ToolName, args)})
+				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "start", ID: e.ToolCallID, Detail: s.toolDetail(agentCtx.Tools, e.ToolName, args)})
 			case agentcore.ToolExecutionUpdateEvent:
 				if tail := outputTail(resultText(e.PartialResult)); tail != "" {
 					emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "output", ID: e.ToolCallID, Text: tail})
@@ -272,8 +281,9 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 // long context (which otherwise fall back to the same unmetered stream).
 func (s *apiServer) meterStreams(managed *managedSession, prov provider.Provider, providerName string) {
 	// The stall guard is outermost, so when it abandons a call the meter
-	// still records it (as aborted) on the way out.
-	stream := provider.StreamFnFromProvider(prov)
+	// still records it (as aborted) on the way out. Tool naming is innermost:
+	// only the provider sees the model-facing names.
+	stream := s.nameStream(provider.StreamFnFromProvider(prov), providerName)
 	idle := streamIdleTimeout()
 	managed.runCfg.Stream = guardStream(s.meter.wrap(stream, providerName, "chat"), idle)
 	managed.runCfg.SummaryStream = guardStream(s.meter.wrap(stream, providerName, "compaction"), idle)

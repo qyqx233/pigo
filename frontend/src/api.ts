@@ -20,6 +20,10 @@ export type SessionInfo = {
   pigoSessionId?: string;
   sandbox?: string;
   alive?: boolean;
+  // toolProfile is the naming profile the session's model gets, and toolNames
+  // what it renames (canonical → model-facing).
+  toolProfile?: string;
+  toolNames?: Record<string, string>;
   // turn is the running (or just-finished) turn; lastTurn how the last one
   // ended, kept across restarts.
   turn?: TurnInfo;
@@ -232,6 +236,10 @@ export type PriceList = { currency: string; unit: string; prices: ModelPrice[] }
 
 // SandboxTool is a toolchain mounted read-only into every sandbox.
 export type SandboxTool = { name: string; mount: string; python?: boolean };
+
+// ExtensionTool is a tool from the tools config: source is "command" or "go",
+// with "-override" when it replaces the built-in of the same name.
+export type ExtensionTool = { name: string; source: string };
 
 export type WorkspaceEntry = { name: string; dir: boolean; size: number };
 
@@ -609,9 +617,14 @@ export class PigoAPI {
 
   // --- billing ----------------------------------------------------------------
 
-  async sandboxTools(): Promise<SandboxTool[]> {
-    const health = await this.request<{ sandbox?: { tools?: SandboxTool[] } }>("/healthz", { headers: this.headers() });
-    return health.sandbox?.tools ?? [];
+  // runtimeTools reads what /healthz reports of the tool setup: the
+  // toolchains mounted into the sandbox and the configured extension tools.
+  async runtimeTools(): Promise<{ sandbox: SandboxTool[]; extensions: ExtensionTool[] }> {
+    const health = await this.request<{ sandbox?: { tools?: SandboxTool[] }; extensions?: { tools?: ExtensionTool[] } }>(
+      "/healthz",
+      { headers: this.headers() },
+    );
+    return { sandbox: health.sandbox?.tools ?? [], extensions: health.extensions?.tools ?? [] };
   }
 
   async prices(): Promise<PriceList> {

@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/smallnest/pigo/cmd/pigo-server/ext/all"
 	serverweb "github.com/smallnest/pigo/cmd/pigo-server/web"
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/runtime"
@@ -52,6 +53,9 @@ type serverConfig struct {
 	// sandboxTools are the -sandbox-tool / PIGO_SANDBOX_TOOLS entries
 	// (name=dir), mounted read-only at /opt/<name> in every sandbox.
 	sandboxTools []string
+	// toolsConfig is the -tools-config / PIGO_TOOLS_CONFIG file: extension
+	// tools and naming profiles (tools_config.go).
+	toolsConfig string
 	// turnTick is how often the brakes are checked; zero means the default.
 	// Not a flag: tests shorten it.
 	turnTick        time.Duration
@@ -67,6 +71,7 @@ type apiServer struct {
 	providerName        string
 	noTools             bool
 	toolNames           []string
+	exts                *toolExtensions
 	reaperStop          chan struct{}
 	auth                *authStore
 	customModels        *customModelStore
@@ -168,6 +173,7 @@ func main() {
 	flag.BoolVar(&cfg.skills, "skills", false, "bind the host skills directory into the sandbox (off by default)")
 	var tools toolFlag
 	flag.Var(&tools, "sandbox-tool", "mount a self-contained toolchain read-only at /opt/<name> in every sandbox, its bin/ first on PATH: name=dir (repeatable; also PIGO_SANDBOX_TOOLS, comma-separated). Build a Python one with cmd/pigo-server/sandbox-python/build.sh")
+	flag.StringVar(&cfg.toolsConfig, "tools-config", os.Getenv("PIGO_TOOLS_CONFIG"), "YAML file of extension tools (added, or replacing a built-in of the same name) and per-model tool naming; also PIGO_TOOLS_CONFIG. See spec/tool-extensions.md")
 	flag.IntVar(&cfg.maxSessions, "max-sessions", 32, "maximum live browser sessions")
 	flag.DurationVar(&cfg.turnIdle, "turn-idle", 10*time.Minute, "stop a turn that makes no progress (no model output, no tool starting or finishing) for this long; 0 disables")
 	flag.DurationVar(&cfg.turnMax, "turn-max", 2*time.Hour, "stop a turn that runs longer than this in total; 0 disables")
@@ -347,6 +353,28 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 		log.Printf("pigo-server: sandbox unavailable: %v (bash tools will fail closed)", bwrapErr)
 	}
 	noTools, toolNames := configuredTools(cfg.tools)
+	exts, err := loadToolsConfig(cfg.toolsConfig)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range exts.tools {
+		how := "adds"
+		if t.replaces {
+			how = "replaces the built-in"
+		}
+		impl := "command: " + t.Command
+		if t.Go != "" {
+			impl = "go: " + t.Go
+		}
+		log.Printf("pigo-server: extension tool %s %s (%s)", t.Name, how, impl)
+	}
+	for _, r := range exts.rules {
+		log.Printf("pigo-server: tool naming: provider %q model %q → profile %s", r.Provider, r.Model, r.Profile)
+	}
+	if toolsAreAll(cfg.tools) {
+		// "all" takes the extensions in too.
+		toolNames = append(toolNames, exts.addedNames()...)
+	}
 	sessions, err := loadSessions(db, cfg.dataDir)
 	if err != nil {
 		return nil, err
@@ -378,6 +406,7 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 		providerName:        providerName,
 		noTools:             noTools,
 		toolNames:           toolNames,
+		exts:                exts,
 		reaperStop:          make(chan struct{}),
 		auth:                auth,
 		customModels:        customModels,
@@ -420,6 +449,8 @@ func (s *apiServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			// and host paths are none of a visitor's business.
 			"tools": sandboxToolsResponse(s.sandbox.Tools),
 		},
+		// Names and kinds only, never commands or env.
+		"extensions": s.exts.report(),
 	})
 }
 
@@ -491,7 +522,7 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 	s.sessions[id] = managed
 	s.mu.Unlock()
 
-	writeJSON(w, http.StatusCreated, sessionResponse(managed))
+	writeJSON(w, http.StatusCreated, s.sessionJSON(managed))
 }
 
 func (s *apiServer) handleGetSession(w http.ResponseWriter, r *http.Request) {
@@ -508,7 +539,7 @@ func (s *apiServer) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	managed.meta.LastUsed = time.Now().UTC()
 	_ = s.saveSession(managed.meta)
-	writeJSON(w, http.StatusOK, sessionResponse(managed))
+	writeJSON(w, http.StatusOK, s.sessionJSON(managed))
 }
 
 func (s *apiServer) handleUpdateSession(w http.ResponseWriter, r *http.Request) {
@@ -562,7 +593,7 @@ func (s *apiServer) handleUpdateSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "write session metadata")
 		return
 	}
-	writeJSON(w, http.StatusOK, sessionResponse(managed))
+	writeJSON(w, http.StatusOK, s.sessionJSON(managed))
 }
 
 func (s *apiServer) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -704,6 +735,9 @@ func (s *apiServer) needsSandbox() bool {
 		if name == "bash" {
 			return true
 		}
+		if spec, ok := s.exts.tool(name); ok && spec.Command != "" {
+			return true
+		}
 	}
 	return false
 }
@@ -841,6 +875,17 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 		return errors.New("request body must contain one JSON object")
 	}
 	return nil
+}
+
+// sessionJSON is sessionResponse plus what only the server knows: the tool
+// naming profile the session's current model gets.
+func (s *apiServer) sessionJSON(managed *managedSession) map[string]any {
+	out := sessionResponse(managed)
+	if name := s.profileName(managed.meta.Provider, managed.meta.Model); name != "" {
+		out["toolProfile"] = name
+		out["toolNames"] = s.exts.profiles[name].wireNames()
+	}
+	return out
 }
 
 func sessionResponse(managed *managedSession) map[string]any {

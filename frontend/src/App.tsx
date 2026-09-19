@@ -49,6 +49,7 @@ import {
   type ProviderInfo,
   type SessionInfo,
   type SessionSettings,
+  type ExtensionTool,
   type SandboxTool,
   type SlashCommandInfo,
   type UserInfo,
@@ -749,6 +750,12 @@ function Shell() {
 }
 
 // modelGroups orders the picker the same way the server orders the list.
+// extensionSourceLabel says where an extension tool comes from.
+function extensionSourceLabel(source: string): string {
+  const kind = source.startsWith("go") ? "Go" : "沙箱命令";
+  return source.endsWith("-override") ? `${kind}，替换内置` : kind;
+}
+
 const modelGroups = [
   { source: "custom", title: "本服务的模型" },
   { source: "free", title: "OpenRouter 免费" },
@@ -1027,9 +1034,19 @@ function SettingsPage({ tab }: { tab: string }) {
   const [customModels, setCustomModels] = useState<CustomModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [sandboxTools, setSandboxTools] = useState<SandboxTool[] | null>(null);
+  const [extensionTools, setExtensionTools] = useState<ExtensionTool[] | null>(null);
   useEffect(() => {
     if (tab !== "runtime") return;
-    void api.sandboxTools().then(setSandboxTools).catch(() => setSandboxTools([]));
+    void api
+      .runtimeTools()
+      .then((info) => {
+        setSandboxTools(info.sandbox);
+        setExtensionTools(info.extensions);
+      })
+      .catch(() => {
+        setSandboxTools([]);
+        setExtensionTools([]);
+      });
   }, [api, tab]);
 
   useEffect(() => {
@@ -1229,8 +1246,28 @@ function SettingsPage({ tab }: { tab: string }) {
                     : sandboxTools.map((t) => `${t.name} → ${t.mount}`).join("，")}
               </strong>
             </div>
+            <div>
+              <span>扩展工具</span>
+              <strong>
+                {extensionTools === null
+                  ? "…"
+                  : extensionTools.length === 0
+                    ? "未配置"
+                    : extensionTools.map((t) => `${t.name}（${extensionSourceLabel(t.source)}）`).join("，")}
+              </strong>
             </div>
-            <p className="security-note">模型 API Key 留在编排进程，不会进入 bwrap。<code>bash</code> 在沙箱中执行；<code>read</code>/<code>write</code> 只作用于本会话 workspace。用 <code>-tools all</code> 或 <code>-tools read,grep</code> 控制工具；用 <code>-sandbox-tool python=目录</code> 把预装常用包的 Python 挂进沙箱（构建见 <code>cmd/pigo-server/sandbox-python/build.sh</code>）。</p>
+            <div>
+              <span>工具命名</span>
+              <strong>
+                {session?.toolProfile
+                  ? `${session.toolProfile}：${Object.entries(session.toolNames ?? {})
+                      .map(([from, to]) => `${from}→${to}`)
+                      .join("，") || "只改描述"}`
+                  : "规范名"}
+              </strong>
+            </div>
+            </div>
+            <p className="security-note">模型 API Key 留在编排进程，不会进入 bwrap。<code>bash</code> 在沙箱中执行；<code>read</code>/<code>write</code> 只作用于本会话 workspace。用 <code>-tools all</code> 或 <code>-tools read,grep</code> 控制工具；用 <code>-sandbox-tool python=目录</code> 把预装常用包的 Python 挂进沙箱（构建见 <code>cmd/pigo-server/sandbox-python/build.sh</code>）；用 <code>-tools-config 文件</code> 加入或替换工具、按模型定制工具名（见 <code>spec/tool-extensions.md</code>）。</p>
           </section>
         )}
 

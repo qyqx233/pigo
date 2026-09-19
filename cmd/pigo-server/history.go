@@ -54,7 +54,7 @@ func (s *apiServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
 					_ = s.saveSession(managed.meta)
 				}
 			}
-			result = append(result, sessionResponse(managed))
+			result = append(result, s.sessionJSON(managed))
 		}
 		managed.mu.Unlock()
 	}
@@ -87,7 +87,9 @@ func (s *apiServer) handleSessionMessages(w http.ResponseWriter, r *http.Request
 			entries = entries[:cut]
 		}
 	}
-	messages := historyMessages(managed.meta.ID, entries)
+	messages := historyMessages(managed.meta.ID, entries, func(name string, args json.RawMessage) string {
+		return s.toolDetail(nil, name, args)
+	})
 	attachTurnUsage(messages, responseTurns(entries), s.sessionLedger(managed.meta))
 	writeJSON(w, http.StatusOK, messages)
 }
@@ -151,7 +153,8 @@ func cleanSessionTitle(value string) string {
 	return string(runes[:maxRunes]) + "…"
 }
 
-func historyMessages(sessionID string, entries []session.Entry) []historyMessage {
+// detail says what a tool call shows in the activity log (apiServer.toolDetail).
+func historyMessages(sessionID string, entries []session.Entry, detail func(name string, args json.RawMessage) string) []historyMessage {
 	result := make([]historyMessage, 0, len(entries))
 	turn := 0
 	for index, entry := range entries {
@@ -173,7 +176,7 @@ func historyMessages(sessionID string, entries []session.Entry) []historyMessage
 						part++
 					}
 				case agentcore.ToolCallContent:
-					result = append(result, historyMessage{ID: fmt.Sprintf("%s-%d", baseID, part), Role: "toolCall", CreatedAt: entry.Timestamp, ToolName: item.Name, ToolCallID: item.ID, Arguments: historyArguments(item.Arguments), Detail: toolDetail(item.Name, item.Arguments)})
+					result = append(result, historyMessage{ID: fmt.Sprintf("%s-%d", baseID, part), Role: "toolCall", CreatedAt: entry.Timestamp, ToolName: item.Name, ToolCallID: item.ID, Arguments: historyArguments(item.Arguments), Detail: detail(item.Name, item.Arguments)})
 					part++
 				}
 			}
