@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -140,6 +141,9 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 	}
 	s.checkpoint(managed, agentCtx.Messages)
 
+	// started times each tool call, for the activity log. OnEvent runs on
+	// one goroutine, so it needs no lock.
+	started := map[string]time.Time{}
 	ctx = withTurn(ctx, turn)
 	defer func() {
 		turn.wait(10 * time.Second)
@@ -163,9 +167,21 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 			}
 			switch e := ev.(type) {
 			case agentcore.ToolExecutionStartEvent:
-				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "start", ID: e.ToolCallID})
+				started[e.ToolCallID] = time.Now()
+				args, _ := e.Args.(json.RawMessage)
+				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "start", ID: e.ToolCallID, Detail: toolDetail(e.ToolName, args)})
+			case agentcore.ToolExecutionUpdateEvent:
+				if tail := outputTail(resultText(e.PartialResult)); tail != "" {
+					emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "output", ID: e.ToolCallID, Text: tail})
+				}
 			case agentcore.ToolExecutionEndEvent:
-				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "end", ID: e.ToolCallID, IsError: e.IsError})
+				var elapsed int64
+				if at, ok := started[e.ToolCallID]; ok {
+					elapsed = time.Since(at).Milliseconds()
+					delete(started, e.ToolCallID)
+				}
+				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "end", ID: e.ToolCallID, IsError: e.IsError,
+					Text: toolFailure(resultText(e.Result), e.IsError), ElapsedMs: elapsed})
 			case agentcore.RetryEvent:
 				// Transient status, not content and not a tool: the request is
 				// being re-issued after a rate limit / overload, and the wait is

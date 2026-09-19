@@ -133,8 +133,12 @@ type turnRun struct {
 	// progress, so the session stays fresh for the idle reaper.
 	onAlive func()
 
-	mu           sync.Mutex
+	mu sync.Mutex
+	// text is the model's text since the last tool call: the answer, if the
+	// turn ends here, or narration that moves into activity when a tool
+	// call follows.
 	text         strings.Builder
+	activity     []activityItem
 	usage        []*usageReport
 	steps        int
 	toolsRunning int
@@ -253,8 +257,51 @@ func (r *turnRun) publish(ev streamEvent) {
 		if ev.Usage != nil {
 			r.usage = append(r.usage, ev.Usage)
 		}
+	case "tool":
+		r.foldToolLocked(ev)
 	}
 	r.broadcastLocked(ev)
+}
+
+// foldToolLocked records a tool event in the activity log. The text the model
+// wrote before a call is its narration of that step, so it moves into the log.
+func (r *turnRun) foldToolLocked(ev streamEvent) {
+	find := func() *activityItem {
+		for i := len(r.activity) - 1; i >= 0; i-- {
+			if r.activity[i].Kind == "tool" && r.activity[i].ID == ev.ID {
+				return &r.activity[i]
+			}
+		}
+		return nil
+	}
+	switch ev.Phase {
+	case "start":
+		if narration := strings.TrimSpace(r.text.String()); narration != "" {
+			r.activity = append(r.activity, activityItem{Kind: "text", Text: narration})
+		}
+		r.text.Reset()
+		r.activity = append(r.activity, activityItem{Kind: "tool", Tool: ev.Tool, ID: ev.ID, Detail: ev.Detail, Status: "running"})
+	case "output":
+		if item := find(); item != nil {
+			item.Output = ev.Text
+		}
+	case "end":
+		status := "ok"
+		if ev.IsError {
+			status = "error"
+		}
+		item := find()
+		if item == nil {
+			// A call the loop rejected before running it has no start.
+			if narration := strings.TrimSpace(r.text.String()); narration != "" {
+				r.activity = append(r.activity, activityItem{Kind: "text", Text: narration})
+			}
+			r.text.Reset()
+			r.activity = append(r.activity, activityItem{Kind: "tool", Tool: ev.Tool, ID: ev.ID})
+			item = &r.activity[len(r.activity)-1]
+		}
+		item.Status, item.Text, item.ElapsedMs, item.Output = status, ev.Text, ev.ElapsedMs, ""
+	}
 }
 
 func (r *turnRun) broadcastLocked(ev streamEvent) {
@@ -359,6 +406,7 @@ func (r *turnRun) subscribe() (snapshot streamEvent, sub *turnSub, final *stream
 	snapshot = streamEvent{
 		Type:      "snapshot",
 		Text:      r.text.String(),
+		Activity:  append([]activityItem(nil), r.activity...),
 		Usages:    append([]*usageReport(nil), r.usage...),
 		Steps:     r.steps,
 		ID:        r.id,

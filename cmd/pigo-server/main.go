@@ -138,8 +138,11 @@ type streamEvent struct {
 	ElapsedMs int64 `json:"elapsedMs,omitempty"`
 	// Reason is why the turn ended ("done", "stalled", …), on its final event.
 	Reason string `json:"reason,omitempty"`
-	// Detail explains a turn that finished but not simply (the step limit).
+	// Detail explains a turn that finished but not simply (the step limit),
+	// or, on a tool's start, what the call is doing (activity.go).
 	Detail string `json:"detail,omitempty"`
+	// Activity is the "snapshot" event's log of the turn so far.
+	Activity []activityItem `json:"activity,omitempty"`
 }
 
 func main() {

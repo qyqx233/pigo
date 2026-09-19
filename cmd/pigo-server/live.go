@@ -179,6 +179,20 @@ type shellResult struct {
 }
 
 func runLiveJob(ctx context.Context, live *liveSandbox, command string) (shellResult, error) {
+	return runLiveJobStream(ctx, live, command, nil)
+}
+
+// outputFunc receives a command's output as it arrives.
+type outputFunc func([]byte)
+
+func (f outputFunc) Write(p []byte) (int, error) {
+	f(p)
+	return len(p), nil
+}
+
+// runLiveJobStream is runLiveJob, also handing the output to onOutput as it
+// arrives (nil for none).
+func runLiveJobStream(ctx context.Context, live *liveSandbox, command string, onOutput func([]byte)) (shellResult, error) {
 	if !live.alive() {
 		return shellResult{}, fmt.Errorf("sandbox is not running")
 	}
@@ -205,7 +219,11 @@ func runLiveJob(ctx context.Context, live *liveSandbox, command string) (shellRe
 	}
 
 	var output boundedSandboxOutput
-	code, readErr := readCommandResult(live.stdout, marker, &output)
+	var sink io.Writer = &output
+	if onOutput != nil {
+		sink = io.MultiWriter(&output, outputFunc(onOutput))
+	}
+	code, readErr := readCommandResult(live.stdout, marker, sink)
 	watcherStopped := cancelWatcher()
 	result := shellResult{Stdout: output.String(), Exit: code}
 	if ctxErr := ctx.Err(); ctxErr != nil {

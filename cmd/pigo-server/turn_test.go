@@ -433,7 +433,10 @@ func TestHistoryHidesRunningTurn(t *testing.T) {
 	attached := openStream(t, context.Background(), http.MethodGet, ts.URL+"/api/sessions/"+id+"/turn", "")
 	snapshot, _ := attached.until("snapshot")
 	attached.close()
-	if !strings.Contains(snapshot.Text, "step 1") || snapshot.Steps != 1 {
+	// The step's text was narration of a tool call, so it is in the activity
+	// log, followed by the call.
+	if len(snapshot.Activity) != 2 || snapshot.Activity[0].Text != "step 1" ||
+		snapshot.Activity[1].Tool != "nosuchtool" || snapshot.Activity[1].Status != "error" || snapshot.Steps != 1 {
 		t.Errorf("snapshot = %+v", snapshot)
 	}
 	resp, _ = http.Post(ts.URL+"/api/sessions/"+id+"/turn/cancel", "application/json", bytes.NewReader(nil))

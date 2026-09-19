@@ -83,7 +83,27 @@ func (t *sandboxBashTool) Execute(ctx context.Context, id string, args json.RawM
 	}
 	live := t.session.live
 	t.session.mu.Unlock()
-	res, err := runLiveJob(runCtx, live, a.Command)
+	// Report the output as it arrives, a few times a second, so a long
+	// command shows progress instead of looking hung.
+	var (
+		tail     []byte
+		lastSent time.Time
+	)
+	progress := func(p []byte) {
+		if onUpdate == nil {
+			return
+		}
+		tail = append(tail, p...)
+		if len(tail) > 4096 {
+			tail = tail[len(tail)-4096:]
+		}
+		if time.Since(lastSent) < 300*time.Millisecond {
+			return
+		}
+		lastSent = time.Now()
+		onUpdate(textResult(string(tail)))
+	}
+	res, err := runLiveJobStream(runCtx, live, a.Command, progress)
 	out := strings.TrimRight(res.Stdout+res.Stderr, "\n")
 	if len(out) > 30_000 {
 		out = out[:12_000] + "\n[truncated]\n" + out[len(out)-12_000:]

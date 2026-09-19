@@ -15,6 +15,7 @@ import {
 } from "@assistant-ui/react";
 import { AdminSettings, AdminUsers } from "./admin";
 import { Prices, SessionCost, UsageLine, UsagePanel, totalsOf } from "./billing";
+import { ActivityLog } from "./activity";
 import { navigate, navigateEvent, parsePath, type Route } from "./route";
 import { Models } from "./models";
 import { Providers } from "./providers";
@@ -35,6 +36,7 @@ import {
   PigoAPI,
   continuableReasons,
   TurnError,
+  type ActivityItem,
   type CallUsage,
   type TurnEnd,
   type TurnHandlers,
@@ -104,22 +106,76 @@ function currentSessionStorageKey(userID: string) {
   return `pigo.currentSession.${userID}`;
 }
 
+// toThreadMessages turns history into the thread: each user message, then one
+// reply per turn — its activity log (the narration and tool calls of every
+// step) and its answer (the text after the last tool call), so a reloaded turn
+// looks the way it did live.
 function toThreadMessages(messages: HistoryMessage[]): ThreadMessageLike[] {
-  return messages
-    .filter(
-      (message): message is HistoryMessage & { role: "user" | "assistant"; content: string } =>
-        (message.role === "user" || message.role === "assistant") && Boolean(message.content),
-    )
-    .map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: [{ type: "text" as const, text: message.content }],
-      createdAt: new Date(message.createdAt),
-      ...(message.role === "assistant"
-        ? { status: { type: "complete" as const, reason: "stop" as const } }
-        : {}),
-      ...(message.usage ? { metadata: { custom: { usage: message.usage } } } : {}),
-    }));
+  type Turn = { id: string; createdAt: string; items: ActivityItem[]; text: string | null; usage?: TurnUsage };
+  const out: ThreadMessageLike[] = [];
+  let turn: Turn | null = null;
+  const current = (message: HistoryMessage): Turn => {
+    turn ??= { id: message.id, createdAt: message.createdAt, items: [], text: null };
+    return turn;
+  };
+  const narrate = (t: Turn) => {
+    if (t.text?.trim()) t.items.push({ kind: "text", text: t.text.trim() });
+    t.text = null;
+  };
+  const flush = () => {
+    if (!turn) return;
+    // A call with no result was cut off with the turn.
+    const items = turn.items.map((item) =>
+      item.kind === "tool" && item.status === "running" ? { ...item, status: "error" as const, text: "未完成" } : item,
+    );
+    const answer = turn.text ?? "";
+    if (answer || items.length > 0) {
+      const custom = { ...(items.length > 0 ? { activity: items } : {}), ...(turn.usage ? { usage: turn.usage } : {}) };
+      out.push({
+        id: turn.id,
+        role: "assistant",
+        content: [{ type: "text" as const, text: answer }],
+        createdAt: new Date(turn.createdAt),
+        status: { type: "complete" as const, reason: "stop" as const },
+        metadata: { custom },
+      });
+    }
+    turn = null;
+  };
+  for (const message of messages) {
+    switch (message.role) {
+      case "user":
+        flush();
+        if (message.content) {
+          out.push({ id: message.id, role: "user", content: [{ type: "text" as const, text: message.content }], createdAt: new Date(message.createdAt) });
+        }
+        break;
+      case "assistant": {
+        const t = current(message);
+        narrate(t);
+        t.text = message.content ?? "";
+        if (message.usage) t.usage = message.usage;
+        break;
+      }
+      case "toolCall": {
+        const t = current(message);
+        narrate(t);
+        t.items.push({ kind: "tool", tool: message.toolName, id: message.toolCallId, detail: message.detail, status: "running" });
+        break;
+      }
+      case "toolResult": {
+        const t = current(message);
+        let index = t.items.length - 1;
+        while (index >= 0 && !(t.items[index].kind === "tool" && t.items[index].id === message.toolCallId)) index--;
+        const done = { status: message.isError ? ("error" as const) : ("ok" as const), text: message.summary };
+        if (index >= 0) t.items[index] = { ...t.items[index], ...done };
+        else t.items.push({ kind: "tool", tool: message.toolName, id: message.toolCallId, ...done });
+        break;
+      }
+    }
+  }
+  flush();
+  return out;
 }
 
 function RuntimeProvider({ children }: { children: ReactNode }) {
@@ -173,6 +229,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     let calls: CallUsage[] = [];
     let counted = fresh ? 0 : -1;
     let end: TurnEnd | null = null;
+    let activity: ActivityItem[] = [];
     const handlers: TurnHandlers = {
       onNotice: setRunNotice,
       onStatus: setRunStatus,
@@ -185,10 +242,19 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
       onEnd(next) {
         end = next;
       },
+      onActivity(items) {
+        activity = items;
+      },
     };
     const shape = (text: string) => ({
       content: [{ type: "text" as const, text }],
-      metadata: { custom: { ...(calls.length > 0 ? { usage: totalsOf(calls) } : {}), ...(end ? { end } : {}) } },
+      metadata: {
+        custom: {
+          ...(calls.length > 0 ? { usage: totalsOf(calls) } : {}),
+          ...(end ? { end } : {}),
+          ...(activity.length > 0 ? { activity } : {}),
+        },
+      },
     });
     let last = "";
     try {
@@ -1488,7 +1554,10 @@ function UserMessage() {
 
 function AssistantMessage() {
   const { error } = usePigo();
-  const custom = useAuiState((state) => state.message.metadata?.custom as { usage?: TurnUsage; end?: TurnEnd } | undefined);
+  const custom = useAuiState(
+    (state) => state.message.metadata?.custom as { usage?: TurnUsage; end?: TurnEnd; activity?: ActivityItem[] } | undefined,
+  );
+  const messageRunning = useAuiState((state) => state.message.status?.type === "running");
   const isLast = useAuiState((state) => state.message.isLast);
   const running = useAuiState((state) => state.thread.isRunning);
   const sendContinue = useSendContinue();
@@ -1504,6 +1573,7 @@ function AssistantMessage() {
       </div>
       <div className="assistant-body">
         <div className="message assistant-message">
+          {custom?.activity && <ActivityLog items={custom.activity} running={messageRunning} />}
           <MessagePrimitive.Content components={{ Text: MarkdownText }} />
           <MessagePrimitive.Error>
             <span className="message-error">{end?.message || error || "生成失败，请重试。"}</span>

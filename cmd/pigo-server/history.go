@@ -23,6 +23,10 @@ type historyMessage struct {
 	ToolCallID string    `json:"toolCallId,omitempty"`
 	Arguments  any       `json:"arguments,omitempty"`
 	IsError    bool      `json:"isError,omitempty"`
+	// Detail (a tool call's one-line description) and Summary (a failed
+	// result's one line) are what the activity log shows (activity.go).
+	Detail  string `json:"detail,omitempty"`
+	Summary string `json:"summary,omitempty"`
 	// Usage is the turn's model usage and cost, on the turn's last assistant
 	// message (see attachTurnUsage).
 	Usage *turnUsage `json:"usage,omitempty"`
@@ -169,12 +173,13 @@ func historyMessages(sessionID string, entries []session.Entry) []historyMessage
 						part++
 					}
 				case agentcore.ToolCallContent:
-					result = append(result, historyMessage{ID: fmt.Sprintf("%s-%d", baseID, part), Role: "toolCall", CreatedAt: entry.Timestamp, ToolName: item.Name, ToolCallID: item.ID, Arguments: historyArguments(item.Arguments)})
+					result = append(result, historyMessage{ID: fmt.Sprintf("%s-%d", baseID, part), Role: "toolCall", CreatedAt: entry.Timestamp, ToolName: item.Name, ToolCallID: item.ID, Arguments: historyArguments(item.Arguments), Detail: toolDetail(item.Name, item.Arguments)})
 					part++
 				}
 			}
 		case agentcore.ToolResultMessage:
-			result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleToolResult, Content: agentcore.ContentToText(message.Content), CreatedAt: entry.Timestamp, ToolName: message.ToolName, ToolCallID: message.ToolCallID, IsError: message.IsError})
+			output := agentcore.ContentToText(message.Content)
+			result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleToolResult, Content: truncateMiddle(output, historyOutputLimit), CreatedAt: entry.Timestamp, ToolName: message.ToolName, ToolCallID: message.ToolCallID, IsError: message.IsError, Summary: toolFailure(output, message.IsError)})
 		}
 		for i := first; i < len(result); i++ {
 			result[i].turn = turn
@@ -200,6 +205,10 @@ func responseTurns(entries []session.Entry) map[string]int {
 	}
 	return out
 }
+
+// historyOutputLimit bounds a tool's output in history; the head and tail are
+// kept.
+const historyOutputLimit = 4000
 
 func historyArguments(raw json.RawMessage) any {
 	if len(raw) == 0 {

@@ -66,6 +66,8 @@ export type TurnHandlers = {
   onUsage?: (calls: CallUsage[]) => void;
   onStatus?: (status: TurnStatus | null) => void;
   onEnd?: (end: TurnEnd) => void;
+  // onActivity: the turn's activity log so far (the full list each time).
+  onActivity?: (items: ActivityItem[]) => void;
 };
 
 export type HistoryMessage = {
@@ -77,9 +79,64 @@ export type HistoryMessage = {
   toolCallId?: string;
   arguments?: unknown;
   isError?: boolean;
+  // detail: a tool call's one-line description; summary: a failed tool
+  // result's one line (shown in the activity log).
+  detail?: string;
+  summary?: string;
   // The turn's model usage, on the turn's last assistant message.
   usage?: TurnUsage;
 };
+
+// ActivityItem is one line of a turn's activity log: the model's narration
+// between tool calls, or a tool call with its status.
+export type ActivityItem = {
+  kind: "text" | "tool";
+  text?: string;
+  tool?: string;
+  id?: string;
+  detail?: string;
+  status?: "running" | "ok" | "error";
+  elapsedMs?: number;
+  // output: the tail of a running command's output.
+  output?: string;
+};
+
+// foldActivity records a tool event in the activity log, as the server does:
+// the text written before a call is its narration and moves into the log.
+// It returns the new log and the text that remains as the answer so far.
+export function foldActivity(
+  items: ActivityItem[],
+  text: string,
+  event: { phase?: string; tool?: string; id?: string; detail?: string; text?: string; isError?: boolean; elapsedMs?: number },
+): { items: ActivityItem[]; text: string } {
+  const next = [...items];
+  const find = () => {
+    for (let i = next.length - 1; i >= 0; i--) {
+      if (next[i].kind === "tool" && next[i].id === event.id) return i;
+    }
+    return -1;
+  };
+  const moveNarration = () => {
+    if (text.trim()) next.push({ kind: "text", text: text.trim() });
+    text = "";
+  };
+  if (event.phase === "start") {
+    moveNarration();
+    next.push({ kind: "tool", tool: event.tool, id: event.id, detail: event.detail, status: "running" });
+  } else if (event.phase === "output") {
+    const i = find();
+    if (i >= 0) next[i] = { ...next[i], output: event.text };
+  } else if (event.phase === "end") {
+    let i = find();
+    if (i < 0) {
+      moveNarration();
+      next.push({ kind: "tool", tool: event.tool, id: event.id });
+      i = next.length - 1;
+    }
+    next[i] = { ...next[i], status: event.isError ? "error" : "ok", text: event.text, elapsedMs: event.elapsedMs, output: undefined };
+  }
+  return { items: next, text };
+}
 
 // --- billing ------------------------------------------------------------------
 
@@ -266,6 +323,9 @@ type StreamEvent = {
   type: "snapshot" | "delta" | "done" | "error" | "tool" | "notice" | "usage" | "heartbeat";
   usage?: CallUsage;
   usages?: CallUsage[];
+  activity?: ActivityItem[];
+  id?: string;
+  isError?: boolean;
   text?: string;
   error?: string;
   tool?: string;
@@ -274,6 +334,8 @@ type StreamEvent = {
   steps?: number;
   elapsedMs?: number;
   reason?: string;
+  // detail: on a tool's start, what the call does; on "done", a note about
+  // how the turn ended (the step limit).
   detail?: string;
 };
 
@@ -694,6 +756,7 @@ export class PigoAPI {
     let pending = "";
     let text = "";
     let calls: CallUsage[] = [];
+    let activity: ActivityItem[] = [];
     for (;;) {
       let chunk: ReadableStreamReadResult<Uint8Array>;
       try {
@@ -714,8 +777,10 @@ export class PigoAPI {
           case "snapshot":
             text = event.text ?? "";
             calls = event.usages ?? [];
+            activity = event.activity ?? [];
             handlers.onUsage?.([...calls]);
-            if (text) yield text;
+            handlers.onActivity?.(activity);
+            yield text;
             break;
           case "delta":
             // Output is flowing, so any pending notice is over.
@@ -732,13 +797,18 @@ export class PigoAPI {
           case "notice":
             handlers.onNotice?.(event.text ?? "");
             break;
-          case "tool":
-            handlers.onStatus?.(
-              event.phase === "start"
-                ? { phase: "tool", tool: event.tool, since: Date.now(), steps: event.steps ?? 0 }
-                : { phase: "model", since: Date.now(), steps: event.steps ?? 0 },
-            );
+          case "tool": {
+            ({ items: activity, text } = foldActivity(activity, text, event));
+            handlers.onActivity?.(activity);
+            if (event.phase === "start") {
+              handlers.onStatus?.({ phase: "tool", tool: event.tool, since: Date.now(), steps: event.steps ?? 0 });
+            } else if (event.phase === "end") {
+              handlers.onStatus?.({ phase: "model", since: Date.now(), steps: event.steps ?? 0 });
+            }
+            // Re-render: the log changed, and narration may have left the text.
+            yield text;
             break;
+          }
           case "heartbeat":
             handlers.onStatus?.({
               phase: event.phase === "tool" ? "tool" : "model",
