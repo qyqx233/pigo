@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/smallnest/pigo/internal/agentcore"
@@ -41,12 +42,13 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 	if err != nil {
 		return err
 	}
-	prov, providerName, err := provider.ResolveProvider(managed.meta.Model, "", "", s.config.provider, os.Getenv)
+	prompt = virtualizeWorkspacePrompt(prompt, ws)
+	prov, providerName, err := s.resolveProvider(managed.meta.Model, managed.meta.Provider)
 	if err != nil {
 		return err
 	}
 	managed.meta.Provider = providerName
-	creds := provider.NewCredentialStore(nil)
+	creds := s.credentialStoreFor(managed, providerName)
 	thinking := agentcore.ThinkingLevel(managed.meta.Thinking)
 	if thinking == "" {
 		thinking = agentcore.ThinkingMedium
@@ -75,11 +77,11 @@ func (s *apiServer) hostTools(managed *managedSession) []agentcore.AgentTool {
 		}
 	}
 	tools := []agentcore.AgentTool{
-		&agenttool.ReadTool{Root: ws, ExtraRoots: extra},
-		&agenttool.WriteTool{Root: ws, ExtraRoots: extra, Snap: snap},
-		&agenttool.EditTool{Root: ws, ExtraRoots: extra, Snap: snap},
-		&agenttool.GrepTool{Root: ws},
-		&agenttool.FindTool{Root: ws},
+		withVirtualWorkspace(&agenttool.ReadTool{Root: ws, ExtraRoots: extra}),
+		withVirtualWorkspace(&agenttool.WriteTool{Root: ws, ExtraRoots: extra, Snap: snap}),
+		withVirtualWorkspace(&agenttool.EditTool{Root: ws, ExtraRoots: extra, Snap: snap}),
+		withVirtualWorkspace(&agenttool.GrepTool{Root: ws}),
+		withVirtualWorkspace(&agenttool.FindTool{Root: ws}),
 		&sandboxBashTool{server: s, session: managed},
 		&agenttool.TodoTool{Store: agenttool.NewTodoStore()},
 		&agenttool.WebFetchTool{},
@@ -125,6 +127,13 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "start", ID: e.ToolCallID})
 			case agentcore.ToolExecutionEndEvent:
 				emit(streamEvent{Type: "tool", Tool: e.ToolName, Phase: "end", ID: e.ToolCallID, IsError: e.IsError})
+			case agentcore.RetryEvent:
+				// Transient status, not content and not a tool: the request is
+				// being re-issued after a rate limit / overload, and the wait is
+				// long enough that a client showing nothing looks hung.
+				emit(streamEvent{Type: "notice", Notice: "retry",
+					Text: fmt.Sprintf("请求失败（%s），%s 后重试（%d/%d）",
+						e.Reason, e.Delay.Round(time.Second), e.Attempt, e.MaxRetries)})
 			}
 		},
 	})
@@ -179,7 +188,7 @@ func (s *apiServer) saveTranscript(managed *managedSession) {
 		UpdatedAt: time.Now().UTC(),
 		Model:     managed.meta.Model,
 		Provider:  managed.meta.Provider,
-		Cwd:       managed.paths.Workspace,
+		Cwd:       virtualWorkspaceRoot,
 	}, managed.agentCtx.Messages)
 }
 
@@ -187,12 +196,12 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 	if managed.agentCtx == nil {
 		return nil
 	}
-	prov, providerName, err := provider.ResolveProvider(managed.meta.Model, "", "", s.config.provider, os.Getenv)
+	prov, providerName, err := s.resolveProvider(managed.meta.Model, managed.meta.Provider)
 	if err != nil {
 		return err
 	}
 	managed.meta.Provider = providerName
-	creds := provider.NewCredentialStore(nil)
+	creds := s.credentialStoreFor(managed, providerName)
 	thinking := agentcore.ThinkingLevel(managed.meta.Thinking)
 	if thinking == "" {
 		thinking = agentcore.ThinkingMedium
@@ -203,4 +212,83 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 	managed.runCfg.Stream = provider.StreamFnFromProvider(prov)
 	managed.runCfg.GetAPIKey = creds.GetAPIKey
 	return nil
+}
+
+// credentialStoreFor builds the provider credential store for one session,
+// applying the precedence the deployment promises: the session owner's own key,
+// then the administrator's shared pool, then nothing — which leaves the store
+// to fall back to the process environment exactly as it did before this
+// feature existed.
+//
+// The override is resolved per session rather than once per process because the
+// owner and the administrator can both change a key while the server runs;
+// applyHostConfig re-runs this on the next request, so an idle session picks up
+// a new key without being recreated.
+func (s *apiServer) credentialStoreFor(managed *managedSession, providerName string) *provider.CredentialStore {
+	creds := provider.NewCredentialStore(nil)
+	if s.credentials == nil {
+		return creds
+	}
+	// SetOverride ignores an empty key, so the environment fallback survives.
+	creds.SetOverride(providerName, s.credentials.resolve(
+		managed.meta.UserID,
+		providerName,
+		s.settings.get().AllowUserKeys,
+	))
+	return creds
+}
+
+// providerResolver maps a model and provider name onto a wire driver. It is
+// threaded through the free functions that need it (slash commands, model
+// validation) rather than reaching for the server, so they stay testable and so
+// the compiler finds every place that must honour custom endpoints.
+type providerResolver func(model, providerName string) (provider.Provider, string, error)
+
+// resolveProviderWith is the shared body: it consults the deployment's custom
+// endpoints before falling back to the registry.
+//
+// A name the administrator defined as a custom endpoint is resolved by protocol
+// and base URL rather than through the registry, and — this is the part that
+// matters — the custom name is kept. provider.ResolveProvider's protocol branch
+// reports the generic driver identity ("openai" / "anthropic"); letting that
+// name through would file the endpoint's credentials under the built-in
+// provider's key and hand a self-hosted gateway the real OpenAI key.
+//
+// Everything else resolves exactly as before.
+func resolveProviderWith(settings *settingsStore, model, providerName string) (provider.Provider, string, error) {
+	if custom, ok := settings.findCustomProvider(providerName); ok {
+		prov, _, err := provider.ResolveProvider(model, custom.BaseURL, custom.Protocol, "", os.Getenv)
+		if err != nil {
+			return nil, "", fmt.Errorf("custom provider %q: %w", custom.Name, err)
+		}
+		return prov, custom.Name, nil
+	}
+	return provider.ResolveProvider(model, "", "", providerName, os.Getenv)
+}
+
+// resolveModel resolves a model a user picked, honouring the catalog: when no
+// provider is named, an entry the user can see (their own, or the shared one)
+// names it. Without this, "/model bonai2" falls through to the name heuristics,
+// which know nothing about this deployment's endpoints and land on openrouter —
+// and the session then sends bonai2 to the wrong server.
+func (s *apiServer) resolveModel(userID, model, providerName string) (provider.Provider, string, error) {
+	if strings.TrimSpace(providerName) == "" {
+		if entry, ok := s.customModels.find(userID, strings.TrimSpace(model)); ok {
+			providerName = entry.Provider
+		}
+	}
+	return s.resolveProvider(model, providerName)
+}
+
+// resolverFor binds resolveModel to one user, in the shape the slash-command
+// helpers take.
+func (s *apiServer) resolverFor(userID string) providerResolver {
+	return func(model, providerName string) (provider.Provider, string, error) {
+		return s.resolveModel(userID, model, providerName)
+	}
+}
+
+// resolveProvider is the server's own resolver.
+func (s *apiServer) resolveProvider(model, providerName string) (provider.Provider, string, error) {
+	return resolveProviderWith(s.settings, model, providerName)
 }

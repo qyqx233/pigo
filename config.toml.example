@@ -90,3 +90,19 @@ no_skills = false
 # percentage of the provider window ("50%"). It only lowers the trigger point and
 # is always clamped by the provider limit.
 # max_context = "300K"
+
+# [retry] controls automatic re-issuing of a provider request that failed
+# transiently: a rate limit (429), an overloaded or 5xx endpoint, a connection
+# that died mid-stream. Permanent failures — a bad key, an unknown model, a
+# rejected request — always fail immediately. On by default; set enabled = false
+# to turn it off.
+#
+# The wait starts at base_delay_ms and doubles per attempt, capped at
+# max_delay_ms. A server-sent Retry-After is honored as a floor; if it exceeds
+# max_delay_ms the run reports the failure instead of stalling. max_retries is
+# the allowance for a whole run, shared by all of its turns.
+# [retry]
+# enabled = true
+# max_retries = 3
+# base_delay_ms = 2000
+# max_delay_ms = 60000

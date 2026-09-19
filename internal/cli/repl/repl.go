@@ -599,6 +599,7 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 			GetAPIKey:     deps.creds.GetAPIKey,
 			ContextWindow: deps.live.ContextWindow,
 			Compaction:    compaction.DefaultCompactionSettings,
+			Retry:         deps.live.Retry,
 		},
 		Batch: agenttool.BatchConfig{
 			ToolExecutorConfig: agenttool.ToolExecutorConfig{
@@ -675,6 +676,10 @@ func streamRun(ctx context.Context, out io.Writer, deps replDeps, prompt string)
 					fmt.Fprintf(out, "compacted: %d → %d tokens, summarized %d messages, kept %d\n",
 						e.TokensBefore, e.TokensAfter, e.SummarizedCount, e.KeptCount)
 				}
+			case agentcore.RetryEvent:
+				fmt.Fprintf(out, "%s\n", ui.Colorize(ui.Enabled(), ui.Dim,
+					fmt.Sprintf("request failed (%s), retrying in %s (%d/%d)…",
+						e.Reason, e.Delay.Round(time.Second), e.Attempt, e.MaxRetries)))
 			}
 		},
 		OnText: func(delta string) {

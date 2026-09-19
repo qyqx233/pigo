@@ -105,14 +105,9 @@ func (d *OpenAIDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 		return nil, fmt.Errorf("openai: parse chunk: %w", err)
 	}
 	if chunk.Error != nil {
-		msg := "openai stream error"
-		if chunk.Error.Type != "" {
-			msg = "openai " + chunk.Error.Type
-		}
-		if chunk.Error.Message != "" {
-			msg += ": " + chunk.Error.Message
-		}
-		return nil, fmt.Errorf("%s", msg)
+		// Typed so the retry policy can read the provider's error type instead
+		// of parsing the rendered message (see errors.go).
+		return nil, &APIError{Family: "openai", Type: chunk.Error.Type, Message: chunk.Error.Message}
 	}
 
 	if chunk.ID != "" {

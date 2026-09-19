@@ -33,6 +33,9 @@ type RunParams struct {
 	APIKey        string
 	ThinkingLevel string
 	ResumeID      string
+	// Retry is the resolved [retry] configuration for agent-level
+	// transient-error retries; a zero value keeps the loop defaults.
+	Retry runtime.RetrySettings
 }
 
 // Run executes one headless run over p.Prompt, writing agent output to out and
@@ -84,6 +87,7 @@ func Run(ctx context.Context, p RunParams, out, errOut io.Writer) int {
 	creds := provider.NewCredentialStore(nil)
 	creds.SetOverride(env.ProviderName, p.APIKey)
 	runCfg := run.NewConfig(p.Model, env.ProviderName, thinking, env.Provider, creds, run.ToolRegistry(env.Tools), run.TodoReminders(env.Tools), env.Schedule)
+	runCfg.Retry = p.Retry
 	runCfg.SessionID = hs.header.ID
 	// Route auto-compaction checkpoints to the shared memory root so a rebuild can
 	// recover the pre-watermark prefix (no-op when memory is disabled → empty root).

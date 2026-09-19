@@ -6,61 +6,124 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
 
-func TestIPCJobProtocol(t *testing.T) {
-	root := t.TempDir()
-	ws := filepath.Join(root, "workspace")
-	home := filepath.Join(root, "home")
-	runDir := filepath.Join(root, "run")
-	for _, dir := range []string{ws, filepath.Join(home, ".pigo"), runDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := writeSupervisor(runDir); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("sh", filepath.Join(runDir, "supervisor.sh"))
-	cmd.Dir = ws
-	cmd.Env = []string{
-		"IPC=" + runDir,
-		"HOME=" + home,
-		"PIGO_HOME=" + filepath.Join(home, ".pigo"),
-		"WORKSPACE=" + ws,
-		"PATH=" + os.Getenv("PATH"),
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer killProcessGroup(cmd)
+func TestLiveShellProtocol(t *testing.T) {
+	live := startTestLiveShell(t, t.TempDir())
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(runDir, "ready")); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	got, err := runIPCJob(context.Background(), runDir, "#!/bin/sh\nprintf one\n")
+	got, err := runLiveJob(context.Background(), live, "printf one")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(got.Stdout) != "one" || got.Exit != 0 {
 		t.Fatalf("first job: %+v", got)
 	}
-	got, err = runIPCJob(context.Background(), runDir, "#!/bin/sh\nprintf two\n")
+	got, err = runLiveJob(context.Background(), live, "printf two; printf err >&2; exit 7")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(got.Stdout) != "two" {
+	if strings.TrimSpace(got.Stdout) != "twoerr" || got.Exit != 7 {
 		t.Fatalf("second job: %+v", got)
 	}
+}
+
+func TestLiveShellDoesNotPersistCommandEnvironment(t *testing.T) {
+	root := t.TempDir()
+	live := startTestLiveShell(t, root)
+	if _, err := runLiveJob(context.Background(), live, "cd /; export PIGO_TEST_VALUE=changed"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := runLiveJob(context.Background(), live, `printf '%s|%s' "$PWD" "${PIGO_TEST_VALUE-unset}"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Stdout != root+"|unset" {
+		t.Fatalf("command state leaked into next run: %q", got.Stdout)
+	}
+}
+
+func TestLiveShellCancellationStopsSandbox(t *testing.T) {
+	live := startTestLiveShell(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := runLiveJob(ctx, live, "sleep 30"); err != context.DeadlineExceeded {
+		t.Fatalf("run error = %v, want deadline exceeded", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for live.alive() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if live.alive() {
+		t.Fatal("sandbox still alive after command cancellation")
+	}
+}
+
+func TestLiveShellHandlesLargeOutputAndMarkerLikeText(t *testing.T) {
+	live := startTestLiveShell(t, t.TempDir())
+	got, err := runLiveJob(context.Background(), live, `printf '\036PIGO_DONE_not-our-token:9\037'; head -c 40000 /dev/zero | tr '\0' x`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exit != 0 {
+		t.Fatalf("exit = %d", got.Exit)
+	}
+	if !strings.Contains(got.Stdout, "PIGO_DONE_not-our-token") || !strings.Contains(got.Stdout, "[truncated]") {
+		t.Fatalf("unexpected bounded output: len=%d prefix=%q", len(got.Stdout), got.Stdout[:min(len(got.Stdout), 80)])
+	}
+	if len(got.Stdout) > outputHeadBytes+outputTailBytes+32 {
+		t.Fatalf("bounded output is too large: %d", len(got.Stdout))
+	}
+}
+
+func TestClearLegacyIPC(t *testing.T) {
+	runDir := t.TempDir()
+	for _, name := range []string{"supervisor.sh", "job.sh", "start", "done", "exit", "cancel", "pid", "ready", "stdout", "stderr", "supervisor.log"} {
+		if err := os.WriteFile(filepath.Join(runDir, name), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "sandbox.log"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clearLegacyIPC(runDir)
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "sandbox.log" {
+		t.Fatalf("legacy IPC cleanup left %v", entries)
+	}
+}
+
+func startTestLiveShell(t *testing.T, dir string) *liveSandbox {
+	t.Helper()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh")
+	cmd.Dir = dir
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stdoutW
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdinR.Close()
+	_ = stdoutW.Close()
+	live := &liveSandbox{cmd: cmd, stdin: stdinW, stdout: stdoutR, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(live.done)
+	}()
+	t.Cleanup(func() { live.stop() })
+	return live
 }
 
 func TestReapIdleStopsProcessKeepsDisk(t *testing.T) {
@@ -73,12 +136,16 @@ func TestReapIdleStopsProcessKeepsDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("sleep", "60")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	live := &liveSandbox{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(live.done)
+	}()
 	managed.mu.Lock()
-	managed.live = cmd
+	managed.live = live
 	managed.meta.LastUsed = time.Now().Add(-time.Hour)
 	managed.mu.Unlock()
 

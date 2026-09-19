@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/smallnest/pigo/internal/agentcore"
+import (
+	"time"
+
+	"github.com/smallnest/pigo/internal/agentcore"
+)
 
 // This file defines the tea.Msg types the event bridge (bridge.go) produces from
 // a run's AgentEvents (US-004, SPEC 5.1). Each raw runtime signal is converted to
@@ -72,6 +76,16 @@ type compactionStartMsg struct{}
 // compactionMsg signals that the loop compacted the context window. The event's
 // details are not needed by the transcript, so it is a bare signal.
 type compactionMsg struct{}
+
+// retryMsg signals that the current turn failed with a transient provider
+// error and the loop is waiting before retrying it. It pins the spinner with a
+// "retrying" label; the next turn's events replace it.
+type retryMsg struct {
+	attempt int
+	max     int
+	delay   time.Duration
+	reason  string
+}
 
 // runEndMsg is the final message: the run has fully drained. err is non-nil when
 // the run ended in error (or was interrupted).

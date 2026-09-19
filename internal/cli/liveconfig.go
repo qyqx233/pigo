@@ -13,6 +13,7 @@ import (
 
 	"github.com/smallnest/pigo/internal/agentcore"
 	"github.com/smallnest/pigo/internal/provider"
+	"github.com/smallnest/pigo/internal/runtime"
 )
 
 // LiveConfig is the mutable run configuration a control command may change
@@ -40,6 +41,11 @@ type LiveConfig struct {
 	// successful fetch; never persisted.
 	FetchedModels []string
 	FetchedAt     time.Time
+
+	// Retry is the resolved agent-level retry policy (transient provider
+	// errors). Zero value keeps the loop defaults; seeded from config.toml's
+	// [retry] table.
+	Retry runtime.RetrySettings
 }
 
 // DefaultContextWindow is the fallback context-token budget used when a model's

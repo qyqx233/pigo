@@ -123,13 +123,12 @@ func (s Sandbox) argv(spec RunSpec) ([]string, error) {
 	return args, nil
 }
 
-func (s Sandbox) liveArgv(spec RunSpec, runDir string) ([]string, error) {
+func (s Sandbox) liveArgv(spec RunSpec) ([]string, error) {
 	args, err := s.mountArgs(spec)
 	if err != nil {
 		return nil, err
 	}
-	args = append(args, "--bind", runDir, "/run/pigo-ipc")
-	args = append(args, "--", "/bin/sh", "/run/pigo-ipc/supervisor.sh")
+	args = append(args, "--", "/bin/sh")
 	return args, nil
 }
 

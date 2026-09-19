@@ -40,6 +40,7 @@ type TelemetrySummary struct {
 	Turns              int                          `json:"turns"`
 	TruncationCount    int                          `json:"truncation_count"`
 	CompactionCount    int                          `json:"compaction_count"`
+	RetryCount         int                          `json:"retry_count"`
 	ContextTokens      int                          `json:"context_tokens"`
 	ContextWindow      int                          `json:"context_window"`
 	ContextUtilization float64                      `json:"context_utilization"`
@@ -59,6 +60,7 @@ func TelemetrySummaryFromEvent(e agentcore.TelemetryEvent) TelemetrySummary {
 		Turns:              e.Turns,
 		TruncationCount:    e.TruncationCount,
 		CompactionCount:    e.CompactionCount,
+		RetryCount:         e.RetryCount,
 		ContextTokens:      e.ContextTokens,
 		ContextWindow:      e.ContextWindow,
 		ContextUtilization: e.ContextUtilization,

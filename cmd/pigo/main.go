@@ -40,6 +40,7 @@ import (
 	"github.com/smallnest/pigo/internal/cli/ui"
 	"github.com/smallnest/pigo/internal/dream"
 	"github.com/smallnest/pigo/internal/provider"
+	"github.com/smallnest/pigo/internal/runtime"
 	"github.com/smallnest/pigo/internal/selfupdate"
 	"github.com/smallnest/pigo/internal/webhook"
 )
@@ -154,6 +155,10 @@ type cliOptions struct {
 	// defaults applied. The interactive REPL consumes it to decide the startup
 	// background auto-consolidation (US-008). Like memory it has no CLI flags.
 	dreamCfg dream.Config
+	// retryCfg is the resolved [retry] configuration (agent-level retry on
+	// transient provider errors), populated by applyFileConfig with defaults
+	// applied. Like dreamCfg it has no CLI flags.
+	retryCfg runtime.RetrySettings
 	// allowedTools and disallowedTools are the --allowed-tools/--disallowed-tools
 	// values: the tool-level admission boundary for the run, filling the gap
 	// between "all tools" and --no-tools. Each is repeatable and each value may be
@@ -368,6 +373,7 @@ func applyFileConfig(opts *cliOptions, cfg config.FileConfig, changed func(strin
 	// the table is absent) so the interactive startup trigger has a resolved
 	// Config. NewConfig treats a nil enabled as true, so dream is on by default.
 	opts.dreamCfg = dream.NewConfig(cfg.Dream.Enabled, cfg.Dream.IntervalDays, cfg.Dream.RecentSessions)
+	opts.retryCfg = resolveRetryConfig(cfg.Retry)
 }
 
 // dispatch runs the resolved command and returns a process exit code, writing
@@ -473,6 +479,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 				ConfigPrompts:     opts.configPrompts,
 				CliPrompts:        opts.promptTemplates,
 				NoPromptTemplates: opts.noPromptTemplates,
+				Retry:             opts.retryCfg,
 			}); err != nil {
 				fmt.Fprintf(errOut, "pigo: %v\n", err)
 				return 1
@@ -497,6 +504,7 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 			CliPrompts:        opts.promptTemplates,
 			NoPromptTemplates: opts.noPromptTemplates,
 			Dream:             opts.dreamCfg,
+			Retry:             opts.retryCfg,
 		}); err != nil {
 			fmt.Fprintf(errOut, "pigo: %v\n", err)
 			return 1
@@ -529,7 +537,28 @@ func dispatch(ctx context.Context, opts cliOptions, out, errOut io.Writer) int {
 		APIKey:        opts.apiKey,
 		ThinkingLevel: opts.thinkingLevel,
 		ResumeID:      resumeID,
+		Retry:         opts.retryCfg,
 	}, out, errOut)
+}
+
+// resolveRetryConfig merges the [retry] table onto the runtime defaults: an
+// absent table (or absent key) keeps the default, and `enabled = false` is the
+// one way to turn retry off.
+func resolveRetryConfig(c config.RetryConfig) runtime.RetrySettings {
+	s := runtime.DefaultRetrySettings()
+	if c.Enabled != nil {
+		s.Disabled = !*c.Enabled
+	}
+	if c.MaxRetries > 0 {
+		s.MaxRetries = c.MaxRetries
+	}
+	if c.BaseDelayMs > 0 {
+		s.BaseDelay = time.Duration(c.BaseDelayMs) * time.Millisecond
+	}
+	if c.MaxDelayMs > 0 {
+		s.MaxDelay = time.Duration(c.MaxDelayMs) * time.Millisecond
+	}
+	return s
 }
 
 // setupExitCode maps a run.SetupEnv failure to a process exit code. A bad tool

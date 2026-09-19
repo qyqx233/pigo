@@ -23,6 +23,7 @@ var goldenEvent = agentcore.TelemetryEvent{
 	Turns:              7,
 	TruncationCount:    1,
 	CompactionCount:    2,
+	RetryCount:         3,
 	ContextTokens:      96_000,
 	ContextWindow:      128_000,
 	ContextUtilization: 0.75,
@@ -89,7 +90,7 @@ func TestTelemetrySummaryFieldTypes(t *testing.T) {
 	if doc["schema_version"] != TelemetrySchemaVersion {
 		t.Errorf("schema_version = %v, want %q", doc["schema_version"], TelemetrySchemaVersion)
 	}
-	intFields := []string{"turns", "truncation_count", "compaction_count", "context_tokens", "context_window"}
+	intFields := []string{"turns", "truncation_count", "compaction_count", "retry_count", "context_tokens", "context_window"}
 	for _, f := range intFields {
 		if _, ok := doc[f].(float64); !ok {
 			t.Errorf("field %q = %T, want number", f, doc[f])

@@ -67,6 +67,19 @@ type FileConfig struct {
 	// internal/dream (Config). See tasks/spec-dream-memory-consolidation.md
 	// §3.3.
 	Dream DreamConfig `toml:"dream"`
+	// Retry is the [retry] TOML table for agent-level retry on transient
+	// provider errors (pi's retry settings). All keys optional; absent keys
+	// keep the defaults (enabled, 3 attempts, 2s base delay, 60s cap).
+	Retry RetryConfig `toml:"retry"`
+}
+
+// RetryConfig is the [retry] TOML table. Enabled is a pointer so an absent key
+// (nil) is distinguishable from an explicit false.
+type RetryConfig struct {
+	Enabled     *bool `toml:"enabled"`
+	MaxRetries  int   `toml:"max_retries"`
+	BaseDelayMs int   `toml:"base_delay_ms"`
+	MaxDelayMs  int   `toml:"max_delay_ms"`
 }
 
 // DreamConfig is the [dream] TOML table for /dream memory consolidation.

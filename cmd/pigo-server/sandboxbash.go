@@ -72,8 +72,7 @@ func (t *sandboxBashTool) Execute(ctx context.Context, id string, args json.RawM
 	if err := t.server.ensureLive(t.session, spec); err != nil {
 		return textResult("bash: sandbox unavailable"), err
 	}
-	script := "#!/bin/sh\nexec /bin/sh -c " + shQuote(a.Command) + "\n"
-	res, err := runIPCJob(runCtx, t.session.paths.Run, script)
+	res, err := runLiveJob(runCtx, t.session.live, a.Command)
 	out := strings.TrimRight(res.Stdout+res.Stderr, "\n")
 	if len(out) > 30_000 {
 		out = out[:12_000] + "\n[truncated]\n" + out[len(out)-12_000:]

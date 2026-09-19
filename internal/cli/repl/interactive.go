@@ -81,6 +81,10 @@ type Options struct {
 	// whether to launch the startup background consolidation; a zero value
 	// (Enabled false) disables the auto-trigger entirely.
 	Dream dream.Config
+
+	// Retry is the resolved [retry] configuration for agent-level transient-error
+	// retries. A zero value keeps the loop defaults (enabled, 3 attempts).
+	Retry runtime.RetrySettings
 }
 
 // Run starts the line-based REPL over a persisted session. It keeps
@@ -159,6 +163,7 @@ func Run(opts Options) error {
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
 		ContextWindow: cli.DefaultContextWindow,
+		Retry:         opts.Retry,
 	}
 
 	// Project trust (US-018, #134): load the persisted trust store for the

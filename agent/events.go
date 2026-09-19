@@ -18,6 +18,7 @@ const (
 	EventToolExecutionUpdate EventType = "tool_execution_update"
 	EventToolExecutionEnd    EventType = "tool_execution_end"
 	EventUsage               EventType = "usage"
+	EventRetry               EventType = "retry"
 )
 
 // Event is the sealed interface implemented by the public structured event
@@ -81,6 +82,15 @@ type UsageEvent struct {
 	Usage Usage `json:"usage"`
 }
 
+// RetryEvent reports that the current turn failed with a transient provider
+// error and will be retried after Delay.
+type RetryEvent struct {
+	Attempt    int    `json:"attempt"`
+	MaxRetries int    `json:"maxRetries"`
+	DelayMs    int64  `json:"delayMs"`
+	Reason     string `json:"reason"`
+}
+
 func (MessageDeltaEvent) isEvent()        {}
 func (MessageEndEvent) isEvent()          {}
 func (ThinkingDeltaEvent) isEvent()       {}
@@ -88,6 +98,7 @@ func (ToolExecutionStartEvent) isEvent()  {}
 func (ToolExecutionUpdateEvent) isEvent() {}
 func (ToolExecutionEndEvent) isEvent()    {}
 func (UsageEvent) isEvent()               {}
+func (RetryEvent) isEvent()               {}
 
 func (MessageDeltaEvent) EventType() EventType        { return EventMessageDelta }
 func (MessageEndEvent) EventType() EventType          { return EventMessageEnd }
@@ -96,6 +107,7 @@ func (ToolExecutionStartEvent) EventType() EventType  { return EventToolExecutio
 func (ToolExecutionUpdateEvent) EventType() EventType { return EventToolExecutionUpdate }
 func (ToolExecutionEndEvent) EventType() EventType    { return EventToolExecutionEnd }
 func (UsageEvent) EventType() EventType               { return EventUsage }
+func (RetryEvent) EventType() EventType               { return EventRetry }
 
 type eventMapper struct {
 	previousText     string
@@ -147,6 +159,13 @@ func (m *eventMapper) handle(event agentcore.AgentEvent) {
 			ToolName:   value.ToolName,
 			Result:     toolResultFromInternal(value.Result),
 			IsError:    value.IsError,
+		})
+	case agentcore.RetryEvent:
+		m.emitEvent(RetryEvent{
+			Attempt:    value.Attempt,
+			MaxRetries: value.MaxRetries,
+			DelayMs:    value.Delay.Milliseconds(),
+			Reason:     value.Reason,
 		})
 	}
 }

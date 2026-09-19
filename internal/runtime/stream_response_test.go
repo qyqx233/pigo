@@ -35,7 +35,7 @@ func runStream(t *testing.T, agentCtx *agentcore.AgentContext, cfg LoopConfig) (
 		got = append(got, ev)
 		return nil
 	}
-	msg, err := streamAssistantResponse(context.Background(), agentCtx, cfg, emit)
+	msg, err := streamAssistantResponse(context.Background(), agentCtx, cfg, nil, emit)
 	if err != nil {
 		t.Fatalf("streamAssistantResponse: %v", err)
 	}

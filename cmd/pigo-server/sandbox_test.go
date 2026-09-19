@@ -69,6 +69,24 @@ func TestSandboxArgvResume(t *testing.T) {
 	}
 }
 
+func TestSandboxLiveArgvUsesPipeDrivenShell(t *testing.T) {
+	argv, err := (Sandbox{Bwrap: "/usr/bin/bwrap"}).liveArgv(RunSpec{
+		Workspace: "/tmp/ws",
+		Home:      "/tmp/home",
+		NoSkills:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, "\n")
+	if !containsPair(argv, "--", "/bin/sh") {
+		t.Fatalf("live argv does not launch the control shell: %v", argv)
+	}
+	if strings.Contains(joined, "pigo-ipc") || strings.Contains(joined, "supervisor") {
+		t.Fatalf("live argv still exposes file IPC: %v", argv)
+	}
+}
+
 func TestSandboxReadyFailClosed(t *testing.T) {
 	s := Sandbox{Bwrap: filepath.Join(t.TempDir(), "missing")}
 	if err := s.Ready(); err == nil {

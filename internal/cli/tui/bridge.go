@@ -70,6 +70,8 @@ func newStreamHandler(ch chan tea.Msg, extra func(agentcore.AgentEvent)) runtime
 				ch <- compactionStartMsg{}
 			case agentcore.CompactionEvent:
 				ch <- compactionMsg{}
+			case agentcore.RetryEvent:
+				ch <- retryMsg{attempt: e.Attempt, max: e.MaxRetries, delay: e.Delay, reason: e.Reason}
 			}
 		},
 	}

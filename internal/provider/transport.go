@@ -84,7 +84,9 @@ type TransportConfig struct {
 	NewRequest func(ctx context.Context) (*http.Request, error)
 	// Decoder converts SSE payloads to StreamEvents (required).
 	Decoder Decoder
-	// MaxConnectRetries bounds connect-only retries (default 2).
+	// MaxConnectRetries bounds connect-only retries: 0 (unset) uses the default
+	// of 2, and a negative value disables them, leaving retries to the
+	// agent-level policy.
 	MaxConnectRetries int
 }
 
@@ -106,6 +108,12 @@ func StreamRequest(ctx context.Context, cfg TransportConfig) (*AssistantMessageE
 	maxRetries := cfg.MaxConnectRetries
 	if maxRetries == 0 {
 		maxRetries = defaultMaxConnectRetries
+	}
+	if maxRetries < 0 {
+		// A negative value asks for no connect-level retries at all (the caller
+		// retries at a higher layer). It must still mean one attempt, or connect
+		// would return no response and no error.
+		maxRetries = 0
 	}
 
 	// Connect once up front so a "cannot even build the stream" failure surfaces
@@ -146,7 +154,10 @@ func connect(ctx context.Context, client *http.Client, newReq func(context.Conte
 			resp.StatusCode == statusTooManyRequestsCF {
 			wait := retryAfter(resp.Header)
 			resp.Body.Close()
-			lastErr = fmt.Errorf("transport: upstream %d", resp.StatusCode)
+			// The hint travels with the error: once these attempts are spent the
+			// agent-level policy retries this same request, and it must not knock
+			// on the door sooner than the server said it may.
+			lastErr = &UpstreamError{Status: resp.StatusCode, RetryAfter: wait}
 			if attempt == maxRetries {
 				return nil, lastErr
 			}
@@ -157,10 +168,21 @@ func connect(ctx context.Context, client *http.Client, newReq func(context.Conte
 		}
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
+			wait := retryAfter(resp.Header)
 			resp.Body.Close()
-			return nil, fmt.Errorf("transport: upstream %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			return nil, &UpstreamError{
+				Status:     resp.StatusCode,
+				RetryAfter: wait,
+				Body:       strings.TrimSpace(string(body)),
+			}
 		}
 		return resp, nil
+	}
+	if lastErr == nil {
+		// Unreachable while the loop runs at least once; keeping the invariant
+		// explicit means a future change can never hand StreamRequest a nil
+		// response with a nil error.
+		lastErr = errors.New("transport: no connection attempt was made")
 	}
 	return nil, lastErr
 }
@@ -226,7 +248,15 @@ func pump(ctx context.Context, stream *AssistantMessageEventStream, resp *http.R
 		}
 		events, err := dec.Decode([]byte(payload))
 		if err != nil {
-			fail("decode error: "+err.Error(), err)
+			// An error the provider reported in-band is not a decoding problem:
+			// report it in its own words so the message the user sees (and the
+			// retry policy's reason) names the provider's error, not ours.
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				fail(err.Error(), err)
+			} else {
+				fail("decode error: "+err.Error(), err)
+			}
 			return false
 		}
 		return emit(events)

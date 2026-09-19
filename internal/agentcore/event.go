@@ -1,5 +1,7 @@
 package agentcore
 
+import "time"
+
 // AgentEvent is the sealed interface implemented by every event the loop emits.
 // Consumers dispatch with a type switch, consistent with Content. pigo covers
 // all 10 of pi's event types (PRD FR-24).
@@ -26,6 +28,7 @@ const (
 	EventCompactionStart     = "compaction_start"
 	EventTelemetry           = "telemetry"
 	EventSubAgentProgress    = "subagent_progress"
+	EventRetry               = "retry"
 )
 
 // AgentStartEvent is emitted once when a loop run begins. SessionID, when set,
@@ -125,6 +128,19 @@ type CompactionStartEvent struct {
 	TokensBefore int
 }
 
+// RetryEvent is emitted when the agent loop is about to retry a turn that
+// failed with a transient provider error (rate limit / overload / 5xx). The
+// failed assistant turn has already ended (turn_end); the loop then waits
+// Delay before re-issuing the request. Attempt is 1-based; a run gives up and
+// surfaces the original error after MaxRetries attempts. Front-ends can show
+// a "retrying in Ns" indicator instead of a silent stall.
+type RetryEvent struct {
+	Attempt    int
+	MaxRetries int
+	Delay      time.Duration
+	Reason     string
+}
+
 // SubAgentProgressEvent carries structured progress from a running sub-agent
 // (dispatched by the task tool). It is reported at the sub-agent's tool
 // execution / turn boundaries so a TUI (multi-line status panel) or headless
@@ -177,6 +193,9 @@ type TelemetryEvent struct {
 	TruncationCount int
 	// CompactionCount is how many successful context compactions occurred.
 	CompactionCount int
+	// RetryCount is how many provider requests were retried after a transient
+	// failure (rate limit / overload / 5xx / a connection that died).
+	RetryCount int
 	// ContextUtilization is the latest used/window ratio in [0,1], or 0 when the
 	// context window is unknown. Computed as ContextTokens / ContextWindow.
 	ContextUtilization float64
@@ -200,6 +219,7 @@ func (CompactionEvent) isAgentEvent()          {}
 func (CompactionStartEvent) isAgentEvent()     {}
 func (TelemetryEvent) isAgentEvent()           {}
 func (SubAgentProgressEvent) isAgentEvent()    {}
+func (RetryEvent) isAgentEvent()               {}
 
 func (AgentStartEvent) EventType() string          { return EventAgentStart }
 func (AgentEndEvent) EventType() string            { return EventAgentEnd }
@@ -215,3 +235,4 @@ func (CompactionEvent) EventType() string          { return EventCompaction }
 func (CompactionStartEvent) EventType() string     { return EventCompactionStart }
 func (TelemetryEvent) EventType() string           { return EventTelemetry }
 func (SubAgentProgressEvent) EventType() string    { return EventSubAgentProgress }
+func (RetryEvent) EventType() string               { return EventRetry }

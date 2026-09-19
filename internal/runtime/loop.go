@@ -189,6 +189,11 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 		return
 	}
 
+	// The retry allowance is per run, shared by every turn: a long multi-turn
+	// task cannot accumulate retries indefinitely. Spending it happens at the
+	// request boundary inside streamAssistantResponse.
+	budget := newRetryBudget(cfg.Retry)
+
 	for { // outer loop: pending / follow-up messages
 		for { // inner loop: turns until no tool calls
 			if err := emit(agentcore.TurnStartEvent{}); err != nil {
@@ -196,7 +201,7 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 				return
 			}
 
-			assistant, err := streamAssistantResponse(ctx, agentCtx, cfg.LoopConfig, emitFrom)
+			assistant, err := streamAssistantResponse(ctx, agentCtx, cfg.LoopConfig, budget, emitFrom)
 			if err != nil {
 				// emit was cancelled mid-stream; end the run.
 				finish()
@@ -218,7 +223,9 @@ func runLoop(ctx context.Context, agentCtx *agentcore.AgentContext, cfg RunConfi
 				}
 				continue
 			case agentcore.StopReasonError, agentcore.StopReasonAborted:
-				// Terminal failure: emit the turn end and stop.
+				// Terminal failure: emit the turn end and stop. A failure that was
+				// worth retrying has already been retried at the request boundary,
+				// so reaching here means the run is genuinely over.
 				_ = emit(agentcore.TurnEndEvent{Message: assistant})
 				finish()
 				return

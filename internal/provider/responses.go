@@ -24,6 +24,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -196,6 +197,8 @@ func (d *responsesDriver) buildPartial(thinking, text string, toolCalls []agentc
 
 // emitError emits a terminal StreamErrorEvent tagged for this provider. Uses a
 // background context so the emit isn't dropped when ctx is already cancelled.
+// The cause is re-typed first so the failure carries the same structure the
+// hand-rolled transport produces and the retry policy can classify it.
 func (d *responsesDriver) emitError(stream *AssistantMessageEventStream, err error) {
 	stream.Emit(context.Background(), StreamErrorEvent{
 		Message: agentcore.AssistantMessage{
@@ -205,8 +208,25 @@ func (d *responsesDriver) emitError(stream *AssistantMessageEventStream, err err
 			StopReason:   agentcore.StopReasonError,
 			ErrorMessage: err.Error(),
 		},
-		Err: fmt.Errorf("%s: %w", d.name, err),
+		Err: fmt.Errorf("%s: %w", d.name, upstreamFromSDK(err)),
 	})
+}
+
+// upstreamFromSDK re-types an openai-go API error (a request that reached the
+// endpoint and came back non-2xx) as an *UpstreamError, so a 429 or 5xx from
+// the Responses API classifies exactly like one from the Chat Completions
+// transport. Connection-level failures are returned unchanged: IsTransient
+// reads those from their net.Error cause.
+func upstreamFromSDK(err error) error {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode == 0 {
+		return err
+	}
+	upstream := &UpstreamError{Status: apiErr.StatusCode, Body: apiErr.RawJSON()}
+	if apiErr.Response != nil {
+		upstream.RetryAfter = retryAfter(apiErr.Response.Header)
+	}
+	return upstream
 }
 
 // newPartial builds an empty assistant message tagged for this provider, the

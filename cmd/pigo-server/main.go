@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -27,34 +25,41 @@ import (
 
 	serverweb "github.com/smallnest/pigo/cmd/pigo-server/web"
 	"github.com/smallnest/pigo/internal/agentcore"
-	"github.com/smallnest/pigo/internal/provider"
 	"github.com/smallnest/pigo/internal/runtime"
 )
 
 const maxRequestBody = 1 << 20 // 1 MiB
 
 type serverConfig struct {
-	listen       string
-	dataDir      string
-	model        string
-	provider     string
-	thinking     string
-	tools        string
-	skills       bool
-	token        string
-	maxSessions  int
-	requestLimit time.Duration
-	idleTimeout  time.Duration
+	listen          string
+	dataDir         string
+	model           string
+	provider        string
+	thinking        string
+	tools           string
+	skills          bool
+	token           string
+	admins          adminRoster
+	maxSessions     int
+	requestLimit    time.Duration
+	idleTimeout     time.Duration
+	emptySessionTTL time.Duration
 }
 
 type apiServer struct {
-	config       serverConfig
-	sandbox      Sandbox
-	loopFn       func(context.Context, *managedSession, string, func(streamEvent)) (string, error)
-	providerName string
-	noTools      bool
-	toolNames    []string
-	reaperStop   chan struct{}
+	config              serverConfig
+	sandbox             Sandbox
+	loopFn              func(context.Context, *managedSession, string, func(streamEvent)) (string, error)
+	modelHTTPClient     *http.Client
+	openRouterModelsURL string
+	providerName        string
+	noTools             bool
+	toolNames           []string
+	reaperStop          chan struct{}
+	auth                *authStore
+	customModels        *customModelStore
+	credentials         *credentialStore
+	settings            *settingsStore
 
 	mu       sync.RWMutex
 	sessions map[string]*managedSession
@@ -64,7 +69,7 @@ type managedSession struct {
 	mu       sync.Mutex
 	paths    sessionPaths
 	meta     sessionMeta
-	live     *exec.Cmd
+	live     *liveSandbox
 	busy     bool
 	closed   bool
 	agentCtx *agentcore.AgentContext
@@ -77,6 +82,7 @@ type messageRequest struct {
 
 type sessionUpdateRequest struct {
 	Model    string `json:"model"`
+	Provider string `json:"provider,omitempty"`
 	Thinking string `json:"thinking"`
 }
 
@@ -84,20 +90,31 @@ type modelResponse struct {
 	ID       string `json:"id"`
 	Label    string `json:"label"`
 	Provider string `json:"provider"`
+	// Source groups the entry for pickers: "custom" (added on this server),
+	// "free" (OpenRouter's live free catalog) or "preset" (the built-in preset
+	// of a provider that has a key).
+	Source string `json:"source,omitempty"`
 }
 
 type streamEvent struct {
-	Type    string `json:"type"`
-	Text    string `json:"text,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Tool    string `json:"tool,omitempty"`
+	Type  string `json:"type"`
+	Text  string `json:"text,omitempty"`
+	Error string `json:"error,omitempty"`
+	Tool  string `json:"tool,omitempty"`
+	// Notice names a transient status the client may surface while the run
+	// continues (currently only "retry"). A client that does not know the
+	// notice type can ignore the event: it carries no conversation content.
+	Notice  string `json:"notice,omitempty"`
 	Phase   string `json:"phase,omitempty"`
 	ID      string `json:"id,omitempty"`
 	IsError bool   `json:"isError,omitempty"`
 }
 
 func main() {
-	cfg := serverConfig{token: os.Getenv("PIGO_SERVER_TOKEN")}
+	cfg := serverConfig{
+		token:  os.Getenv("PIGO_SERVER_TOKEN"),
+		admins: parseAdminRoster(os.Getenv("PIGO_ADMIN_USERS")),
+	}
 	flag.StringVar(&cfg.listen, "listen", "127.0.0.1:8080", "HTTP listen address")
 	flag.StringVar(&cfg.dataDir, "data", defaultDataDir(), "session workspace root")
 	flag.StringVar(&cfg.model, "model", "openrouter/free", "model id")
@@ -108,6 +125,7 @@ func main() {
 	flag.IntVar(&cfg.maxSessions, "max-sessions", 32, "maximum live browser sessions")
 	flag.DurationVar(&cfg.requestLimit, "request-timeout", 10*time.Minute, "maximum duration of one agent request")
 	flag.DurationVar(&cfg.idleTimeout, "idle", 30*time.Minute, "stop an idle sandbox process after this duration; 0 disables idle expiry. Disk state is kept. There is no maximum lifetime.")
+	flag.DurationVar(&cfg.emptySessionTTL, "empty-session-ttl", time.Hour, "delete sessions with no transcript and an empty workspace after this duration; 0 disables cleanup")
 	flag.Parse()
 
 	if cfg.maxSessions < 1 {
@@ -116,8 +134,8 @@ func main() {
 	if cfg.requestLimit <= 0 {
 		log.Fatal("-request-timeout must be positive")
 	}
-	if !isLoopbackAddress(cfg.listen) && cfg.token == "" {
-		log.Fatal("PIGO_SERVER_TOKEN is required when -listen is not a loopback address")
+	if cfg.emptySessionTTL < 0 {
+		log.Fatal("-empty-session-ttl cannot be negative")
 	}
 
 	api, err := newAPIServer(cfg)
@@ -129,15 +147,51 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("GET /", serverweb.Handler())
 	mux.HandleFunc("GET /healthz", api.handleHealth)
-	mux.Handle("POST /api/sessions", api.requireAuth(http.HandlerFunc(api.handleCreateSession)))
-	mux.Handle("GET /api/sessions/{id}", api.requireAuth(http.HandlerFunc(api.handleGetSession)))
-	mux.Handle("PATCH /api/sessions/{id}", api.requireAuth(http.HandlerFunc(api.handleUpdateSession)))
-	mux.Handle("DELETE /api/sessions/{id}", api.requireAuth(http.HandlerFunc(api.handleDeleteSession)))
-	mux.Handle("GET /api/sessions/{id}/commands", api.requireAuth(http.HandlerFunc(api.handleCommands)))
-	mux.Handle("POST /api/sessions/{id}/messages", api.requireAuth(http.HandlerFunc(api.handleMessage)))
-	mux.Handle("GET /api/sessions/{id}/files", api.requireAuth(http.HandlerFunc(api.handleListFiles)))
-	mux.Handle("GET /api/sessions/{id}/files/raw", api.requireAuth(http.HandlerFunc(api.handleReadFile)))
-	mux.Handle("GET /api/models", api.requireAuth(http.HandlerFunc(api.handleModels)))
+	mux.HandleFunc("POST /api/auth/register", api.handleRegister)
+	mux.HandleFunc("POST /api/auth/login", api.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", api.handleLogout)
+	mux.Handle("GET /api/auth/me", api.requirePrincipal(http.HandlerFunc(api.handleMe)))
+	mux.Handle("GET /api/sessions", api.requirePrincipal(http.HandlerFunc(api.handleListSessions)))
+	mux.Handle("POST /api/sessions", api.requirePrincipal(http.HandlerFunc(api.handleCreateSession)))
+	mux.Handle("GET /api/sessions/{id}", api.requirePrincipal(http.HandlerFunc(api.handleGetSession)))
+	mux.Handle("PATCH /api/sessions/{id}", api.requirePrincipal(http.HandlerFunc(api.handleUpdateSession)))
+	mux.Handle("DELETE /api/sessions/{id}", api.requirePrincipal(http.HandlerFunc(api.handleDeleteSession)))
+	mux.Handle("GET /api/sessions/{id}/commands", api.requirePrincipal(http.HandlerFunc(api.handleCommands)))
+	mux.Handle("GET /api/sessions/{id}/messages", api.requirePrincipal(http.HandlerFunc(api.handleSessionMessages)))
+	mux.Handle("POST /api/sessions/{id}/messages", api.requirePrincipal(http.HandlerFunc(api.handleMessage)))
+	mux.Handle("GET /api/sessions/{id}/files", api.requirePrincipal(http.HandlerFunc(api.handleListFiles)))
+	mux.Handle("GET /api/sessions/{id}/files/raw", api.requirePrincipal(http.HandlerFunc(api.handleReadFile)))
+	mux.Handle("GET /api/models", api.requirePrincipal(http.HandlerFunc(api.handleModels)))
+	mux.Handle("GET /api/custom-models", api.requirePrincipal(http.HandlerFunc(api.handleListCustomModels)))
+	mux.Handle("GET /api/providers", api.requirePrincipal(http.HandlerFunc(api.handleListProviders)))
+	mux.Handle("POST /api/custom-models", api.requirePrincipal(http.HandlerFunc(api.handleAddCustomModel)))
+	mux.Handle("DELETE /api/custom-models/{id...}", api.requirePrincipal(http.HandlerFunc(api.handleDeleteCustomModel)))
+
+	// A user's own provider keys.
+	mux.Handle("GET /api/credentials", api.requirePrincipal(http.HandlerFunc(api.handleListCredentials)))
+	mux.Handle("PUT /api/credentials/{provider}", api.requirePrincipal(http.HandlerFunc(api.handleSetCredential)))
+	mux.Handle("DELETE /api/credentials/{provider}", api.requirePrincipal(http.HandlerFunc(api.handleDeleteCredential)))
+
+	// The admin console. requireAdmin runs inside requirePrincipal, so an
+	// anonymous request is rejected as unauthorized before the role is checked.
+	admin := func(h http.HandlerFunc) http.Handler {
+		return api.requirePrincipal(api.requireAdmin(h))
+	}
+	mux.Handle("GET /api/admin/settings", admin(api.handleGetSettings))
+	mux.Handle("PUT /api/admin/settings", admin(api.handleUpdateSettings))
+	mux.Handle("GET /api/admin/credentials", admin(api.handleListPublicCredentials))
+	mux.Handle("PUT /api/admin/credentials/{provider}", admin(api.handleSetPublicCredential))
+	mux.Handle("DELETE /api/admin/credentials/{provider}", admin(api.handleDeletePublicCredential))
+	mux.Handle("GET /api/admin/models", admin(api.handleListPublicModels))
+	mux.Handle("POST /api/admin/models", admin(api.handleAddPublicModel))
+	mux.Handle("DELETE /api/admin/models/{id...}", admin(api.handleDeletePublicModel))
+	mux.Handle("GET /api/admin/providers", admin(api.handleListCustomProviders))
+	mux.Handle("PUT /api/admin/providers", admin(api.handlePutCustomProvider))
+	mux.Handle("DELETE /api/admin/providers/{name}", admin(api.handleDeleteCustomProvider))
+	mux.Handle("GET /api/admin/users", admin(api.handleListUsers))
+	mux.Handle("POST /api/admin/users/{id}/disable", admin(api.handleSetUserDisabled))
+	mux.Handle("POST /api/admin/users/{id}/password", admin(api.handleResetUserPassword))
+	mux.Handle("DELETE /api/admin/users/{id}", admin(api.handleDeleteUser))
 
 	httpServer := &http.Server{
 		Addr:              cfg.listen,
@@ -152,6 +206,7 @@ func main() {
 	go func() {
 		log.Printf("pigo web server listening on http://%s (model=%s, tools=%s, sandbox=bwrap, data=%s)",
 			cfg.listen, cfg.model, toolSummary(cfg.tools), cfg.dataDir)
+		log.Printf("admins: %s", cfg.admins.describe())
 		errCh <- httpServer.ListenAndServe()
 	}()
 
@@ -179,7 +234,13 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 	if !validThinking(cfg.thinking) {
 		return nil, fmt.Errorf("invalid thinking level %q", cfg.thinking)
 	}
-	_, providerName, err := provider.ResolveProvider(cfg.model, "", "", cfg.provider, os.Getenv)
+	// Settings first: the default model may name a custom endpoint, which only
+	// the settings store knows about.
+	settings, err := newSettingsStore(cfg)
+	if err != nil {
+		return nil, err
+	}
+	_, providerName, err := resolveProviderWith(settings, cfg.model, cfg.provider)
 	if err != nil {
 		return nil, fmt.Errorf("configure agent: %w", err)
 	}
@@ -190,16 +251,37 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 	}
 	noTools, toolNames := configuredTools(cfg.tools)
 	sessions := loadSessions(cfg.dataDir)
-	s := &apiServer{
-		config:       cfg,
-		sandbox:      sandbox,
-		providerName: providerName,
-		noTools:      noTools,
-		toolNames:    toolNames,
-		reaperStop:   make(chan struct{}),
-		sessions:     sessions,
+	auth, err := newAuthStore(cfg.dataDir)
+	if err != nil {
+		return nil, err
 	}
-	if cfg.idleTimeout > 0 {
+	customModels, err := newCustomModelStore(cfg.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	credentials, err := newCredentialStore(cfg.dataDir, os.Getenv(credentialSecretEnv))
+	if err != nil {
+		return nil, err
+	}
+	if !credentials.enabled() {
+		log.Printf("pigo-server: %s is not set; stored provider API keys are disabled (existing credentials.json is left untouched)", credentialSecretEnv)
+	}
+	s := &apiServer{
+		config:              cfg,
+		sandbox:             sandbox,
+		modelHTTPClient:     &http.Client{Timeout: 10 * time.Second},
+		openRouterModelsURL: defaultOpenRouterModelsURL,
+		providerName:        providerName,
+		noTools:             noTools,
+		toolNames:           toolNames,
+		reaperStop:          make(chan struct{}),
+		auth:                auth,
+		customModels:        customModels,
+		credentials:         credentials,
+		settings:            settings,
+		sessions:            sessions,
+	}
+	if cfg.idleTimeout > 0 || cfg.emptySessionTTL > 0 {
 		go s.reapLoop()
 	}
 	return s, nil
@@ -230,27 +312,24 @@ func (s *apiServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *apiServer) handleModels(w http.ResponseWriter, _ *http.Request) {
-	models := make([]modelResponse, 0, len(provider.PresetCatalog))
-	for _, model := range provider.PresetCatalog {
-		models = append(models, modelResponse{
-			ID:       model.ID,
-			Label:    model.Label(),
-			Provider: model.Provider,
-		})
+func (s *apiServer) handleModels(w http.ResponseWriter, r *http.Request) {
+	models, freeErr := s.usableModels(r, principalForRequest(r).UserID, "")
+	if len(models) == 0 && freeErr != nil {
+		writeError(w, http.StatusBadGateway, "load OpenRouter models: "+freeErr.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, models)
 }
 
 func (s *apiServer) handleCommands(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.getSession(r.PathValue("id")); !ok {
+	if _, ok := s.sessionForRequest(r, r.PathValue("id")); !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, webCommands())
 }
 
-func (s *apiServer) handleCreateSession(w http.ResponseWriter, _ *http.Request) {
+func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	id, err := randomID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create session id")
@@ -262,13 +341,24 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, _ *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The administrator's defaults win over the start-up flags: the flags are
+	// only the seed the settings store falls back to, so reading config here
+	// would make the 部署 panel's "默认模型" silently do nothing.
+	defaults := s.settings.get()
+	userID := principalForRequest(r).UserID
+	model, thinking := defaults.DefaultModel, defaults.DefaultThinking
+	providerName := s.providerName
+	if _, resolved, err := s.resolveModel(userID, model, ""); err == nil {
+		providerName = resolved
+	}
 	managed := &managedSession{
 		paths: paths,
 		meta: sessionMeta{
 			ID:        id,
-			Model:     s.config.model,
-			Provider:  s.providerName,
-			Thinking:  s.config.thinking,
+			UserID:    userID,
+			Model:     model,
+			Provider:  providerName,
+			Thinking:  thinking,
 			Tools:     append([]string(nil), s.toolNames...),
 			CreatedAt: now,
 			LastUsed:  now,
@@ -294,7 +384,7 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (s *apiServer) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	managed, ok := s.getSession(r.PathValue("id"))
+	managed, ok := s.sessionForRequest(r, r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -305,6 +395,8 @@ func (s *apiServer) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	managed.meta.LastUsed = time.Now().UTC()
+	_ = managed.paths.saveMeta(managed.meta)
 	writeJSON(w, http.StatusOK, sessionResponse(managed))
 }
 
@@ -318,8 +410,12 @@ func (s *apiServer) handleUpdateSession(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "model or thinking is required")
 		return
 	}
+	if strings.TrimSpace(request.Model) == "" && strings.TrimSpace(request.Provider) != "" {
+		writeError(w, http.StatusBadRequest, "provider requires model")
+		return
+	}
 
-	managed, ok := s.getSession(r.PathValue("id"))
+	managed, ok := s.sessionForRequest(r, r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -331,7 +427,11 @@ func (s *apiServer) handleUpdateSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if model := strings.TrimSpace(request.Model); model != "" {
-		if _, err := applyModel(&managed.meta, model); err != nil {
+		if m, expired := s.expiredCustomModel(r, model); expired {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("custom model %q expired on %s; pick another model or renew it", m.ID, m.ExpiresAt))
+			return
+		}
+		if _, err := applyModelForProvider(&managed.meta, model, request.Provider, s.resolverFor(principalForRequest(r).UserID)); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -358,6 +458,11 @@ func (s *apiServer) handleDeleteSession(w http.ResponseWriter, r *http.Request) 
 	id := r.PathValue("id")
 	s.mu.Lock()
 	managed, ok := s.sessions[id]
+	if ok {
+		managed.mu.Lock()
+		ok = !managed.closed && principalCanAccess(principalForRequest(r), managed.meta)
+		managed.mu.Unlock()
+	}
 	if ok {
 		delete(s.sessions, id)
 	}
@@ -392,7 +497,7 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
-	managed, ok := s.getSession(id)
+	managed, ok := s.sessionForRequest(r, id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -405,7 +510,16 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managed.meta.LastUsed = time.Now().UTC()
-	prompt, prefix, complete, err := resolveWebInput(&managed.meta, request.Prompt)
+	if m, expired := s.expiredCustomModel(r, managed.meta.Model); expired {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("custom model %q expired on %s; switch model before sending", m.ID, m.ExpiresAt))
+		return
+	}
+	if managed.meta.Title == "" {
+		managed.meta.Title = cleanSessionTitle(request.Prompt)
+	}
+	userID := principalForRequest(r).UserID
+	prompt, prefix, complete, err := resolveWebInput(&managed.meta, request.Prompt, s.resolverFor(userID),
+		func(filter string) string { return s.modelListing(r, userID, filter) })
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -517,7 +631,7 @@ func toolsAreAll(value string) bool {
 }
 
 func (s *apiServer) handleListFiles(w http.ResponseWriter, r *http.Request) {
-	managed, ok := s.getSession(r.PathValue("id"))
+	managed, ok := s.sessionForRequest(r, r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -542,7 +656,7 @@ func (s *apiServer) handleListFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *apiServer) handleReadFile(w http.ResponseWriter, r *http.Request) {
-	managed, ok := s.getSession(r.PathValue("id"))
+	managed, ok := s.sessionForRequest(r, r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -622,29 +736,6 @@ func (s *apiServer) close() {
 	}
 }
 
-func (s *apiServer) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.config.token != "" {
-			provided, ok := bearerToken(r.Header.Get("Authorization"))
-			if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(s.config.token)) != 1 {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="pigo-server"`)
-				writeError(w, http.StatusUnauthorized, "unauthorized")
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func bearerToken(header string) (string, bool) {
-	scheme, token, ok := strings.Cut(strings.TrimSpace(header), " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return "", false
-	}
-	token = strings.TrimSpace(token)
-	return token, token != ""
-}
-
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -669,12 +760,14 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 
 func sessionResponse(managed *managedSession) map[string]any {
 	m := managed.meta
+	tools := append([]string{}, m.Tools...)
 	return map[string]any{
 		"id":            m.ID,
+		"title":         m.Title,
 		"model":         m.Model,
 		"provider":      m.Provider,
 		"thinking":      m.Thinking,
-		"tools":         m.Tools,
+		"tools":         tools,
 		"createdAt":     m.CreatedAt,
 		"lastUsed":      m.LastUsed,
 		"pigoSessionId": m.PigoSessionID,

@@ -28,6 +28,7 @@ type telemetry struct {
 	turns           int
 	truncationCount int
 	compactionCount int
+	retryCount      int
 
 	// toolStarts maps an in-flight tool call id to the wall-clock time its
 	// execution began, so the matching end event can compute a duration. Keying
@@ -67,6 +68,8 @@ func (t *telemetry) observe(ev agentcore.AgentEvent) {
 	switch e := ev.(type) {
 	case agentcore.TurnStartEvent:
 		t.turns++
+	case agentcore.RetryEvent:
+		t.retryCount++
 	case agentcore.ToolExecutionStartEvent:
 		t.toolStarts[e.ToolCallID] = t.now()
 	case agentcore.ToolExecutionEndEvent:
@@ -130,6 +133,7 @@ func (t *telemetry) summary() agentcore.TelemetryEvent {
 		ToolDurationsMs:    timings,
 		TruncationCount:    t.truncationCount,
 		CompactionCount:    t.compactionCount,
+		RetryCount:         t.retryCount,
 		ContextUtilization: utilization,
 		ContextTokens:      t.contextTokens,
 		ContextWindow:      t.contextWindow,

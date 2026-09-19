@@ -10,8 +10,10 @@
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.18",
+    "@assistant-ui/react-markdown": "0.14.15",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "19.2.18",

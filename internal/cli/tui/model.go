@@ -184,6 +184,7 @@ func NewModel(opts Options) Model {
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
 		ContextWindow: cli.DefaultContextWindow,
+		Retry:         opts.Retry,
 	}
 	return Model{
 		opts:       opts,
@@ -347,12 +348,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tickSpinner()
 
 	case textDeltaMsg:
+		// The first token of a response clears any phase label pinned while the
+		// run was waiting (a retry backoff, a compaction): the model is producing
+		// again, so the pinned phrase is over.
+		m.spinner.unpin()
 		m.spinner.addTokens(msg.delta)
 		m.transcript.appendDelta(msg.delta)
 		m.remoteEcho(msg.delta)
 		return m, m.pumpNext()
 
 	case turnEndMsg:
+		// Same for a turn that ends without text (tool calls only): whatever
+		// phase was pinned before it ran is finished.
+		m.spinner.unpin()
 		m.transcript.finalizeTurn(msg.msg)
 		// Surface a failed or empty turn so a provider/API error is never silent.
 		// The loop delivers request failures (e.g. a 4xx from the endpoint) as a
@@ -463,6 +471,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case compactionStartMsg:
 		m.spinner.pin("Compacting conversation")
+		return m, m.pumpNext()
+
+	case retryMsg:
+		m.spinner.pin(fmt.Sprintf("Retrying in %s (%d/%d) after transient error", msg.delay.Round(time.Second), msg.attempt, msg.max))
 		return m, m.pumpNext()
 
 	case compactionMsg:

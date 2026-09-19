@@ -194,6 +194,7 @@ func newRunSessionWithStore(store *session.Store, opts Options) (*runSession, []
 		Protocol:      opts.Protocol,
 		ThinkingLevel: opts.ThinkingLevel,
 		ContextWindow: cli.DefaultContextWindow,
+		Retry:         opts.Retry,
 	}
 
 	// Project trust (US-018, #134): load the persisted trust store for the
@@ -304,6 +305,7 @@ func (s *runSession) buildConfig() runtime.RunConfig {
 			GetAPIKey:     s.creds.GetAPIKey,
 			ContextWindow: s.live.ContextWindow,
 			Compaction:    compaction.DefaultCompactionSettings,
+			Retry:         s.live.Retry,
 		},
 		Batch: agenttool.BatchConfig{
 			ToolExecutorConfig: agenttool.ToolExecutorConfig{

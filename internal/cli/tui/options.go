@@ -56,4 +56,8 @@ type Options struct {
 	// settings, CLI); built-in slash commands are unaffected. Independent of
 	// --no-skills.
 	NoPromptTemplates bool
+
+	// Retry is the resolved [retry] configuration for agent-level transient-error
+	// retries. A zero value keeps the loop defaults (enabled, 3 attempts).
+	Retry runtime.RetrySettings
 }

@@ -14,9 +14,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smallnest/pigo/internal/cli/config"
 	"github.com/smallnest/pigo/internal/cli/run"
+	"github.com/smallnest/pigo/internal/runtime"
 )
 
 // --- dispatch seam ---
@@ -346,5 +348,38 @@ func TestApplyFileConfig_MemoryOverride(t *testing.T) {
 	}
 	if got := opts.memory.MaxContext.Resolve(200000); got != 100000 {
 		t.Errorf("max_context 50%% of 200000 = %d, want 100000", got)
+	}
+}
+
+// An absent [retry] table leaves retry on with the runtime defaults.
+func TestApplyFileConfig_RetryDefaults(t *testing.T) {
+	var opts cliOptions
+	applyFileConfig(&opts, config.FileConfig{}, changedSet())
+	if opts.retryCfg != runtime.DefaultRetrySettings() {
+		t.Errorf("retry defaults = %+v, want %+v", opts.retryCfg, runtime.DefaultRetrySettings())
+	}
+}
+
+// [retry] overlays field by field, and enabled=false is the documented opt-out.
+func TestApplyFileConfig_RetryOverride(t *testing.T) {
+	var opts cliOptions
+	applyFileConfig(&opts, config.FileConfig{
+		Retry: config.RetryConfig{MaxRetries: 5, BaseDelayMs: 500},
+	}, changedSet())
+	if opts.retryCfg.Disabled {
+		t.Error("retry must stay enabled when [retry] only tunes numbers")
+	}
+	if opts.retryCfg.MaxRetries != 5 || opts.retryCfg.BaseDelay != 500*time.Millisecond {
+		t.Errorf("retry overlay = %+v", opts.retryCfg)
+	}
+	if opts.retryCfg.MaxDelay != runtime.DefaultRetrySettings().MaxDelay {
+		t.Errorf("unset max_delay_ms must keep the default, got %v", opts.retryCfg.MaxDelay)
+	}
+
+	off := false
+	var disabled cliOptions
+	applyFileConfig(&disabled, config.FileConfig{Retry: config.RetryConfig{Enabled: &off}}, changedSet())
+	if !disabled.retryCfg.Disabled {
+		t.Error("enabled=false must disable retry")
 	}
 }

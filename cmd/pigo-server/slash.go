@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/smallnest/pigo/internal/provider"
@@ -41,7 +40,30 @@ func webCommands() []slashCommand {
 	return out
 }
 
-func resolveWebInput(meta *sessionMeta, input string) (prompt, message string, complete bool, err error) {
+// resolveWebInput intercepts slash commands. resolve and listModels come from
+// the server: /model must honour custom endpoints, and /models must reflect
+// what this user can actually run rather than every model pigo can route.
+func resolveWebInput(meta *sessionMeta, input string, resolve providerResolver, listModels func(filter string) string) (prompt, message string, complete bool, err error) {
+	prompt, message, complete, err = interpretWebInput(meta, input, resolve, listModels)
+	return prompt, asMarkdownLines(message), complete, err
+}
+
+// asMarkdownLines keeps a command's plain-text output one line per line. The
+// reply lands in an assistant bubble, which renders Markdown, where a lone
+// newline is only a soft break and every multi-line listing would run together
+// into one paragraph. A trailing double space makes each newline a hard break.
+func asMarkdownLines(text string) string {
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSpace(line)
+	}
+	return strings.Join(lines, "  \n")
+}
+
+func interpretWebInput(meta *sessionMeta, input string, resolve providerResolver, listModels func(filter string) string) (prompt, message string, complete bool, err error) {
 	trimmed := strings.TrimSpace(input)
 	if !strings.HasPrefix(trimmed, "/") {
 		return input, "", false, nil
@@ -57,9 +79,9 @@ func resolveWebInput(meta *sessionMeta, input string) (prompt, message string, c
 	case "help":
 		return "", formatHelp(), true, nil
 	case "models":
-		return "", presetListing(args), true, nil
+		return "", listModels(args), true, nil
 	case "model":
-		msg, applyErr := applyModel(meta, args)
+		msg, applyErr := applyModel(meta, args, resolve)
 		return "", msg, true, applyErr
 	case "think", "effect":
 		msg, applyErr := applyThinking(meta, args)
@@ -93,18 +115,22 @@ func formatHelp() string {
 	return b.String()
 }
 
-func applyModel(meta *sessionMeta, id string) (string, error) {
+func applyModel(meta *sessionMeta, id string, resolve providerResolver) (string, error) {
+	return applyModelForProvider(meta, id, "", resolve)
+}
+
+func applyModelForProvider(meta *sessionMeta, id, providerName string, resolve providerResolver) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return fmt.Sprintf("model: %s (provider: %s)\nrun /models to see presets, or /model <id> to switch", meta.Model, meta.Provider), nil
 	}
-	_, providerName, err := provider.ResolveProvider(id, "", "", "", os.Getenv)
+	_, resolvedProvider, err := resolve(id, strings.TrimSpace(providerName))
 	if err != nil {
 		return "", fmt.Errorf("model: cannot switch to %q: %w", id, err)
 	}
 	meta.Model = id
-	meta.Provider = providerName
-	return fmt.Sprintf("model switched to %s (provider: %s)", id, providerName), nil
+	meta.Provider = resolvedProvider
+	return fmt.Sprintf("model switched to %s (provider: %s)", id, resolvedProvider), nil
 }
 
 func applyThinking(meta *sessionMeta, level string) (string, error) {

@@ -32,6 +32,8 @@ func newSessionPaths(dataDir, id string) sessionPaths {
 
 type sessionMeta struct {
 	ID            string    `json:"id"`
+	UserID        string    `json:"userId,omitempty"`
+	Title         string    `json:"title,omitempty"`
 	PigoSessionID string    `json:"pigoSessionId,omitempty"`
 	Model         string    `json:"model"`
 	Provider      string    `json:"provider"`

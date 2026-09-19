@@ -137,16 +137,14 @@ func (d *AnthropicDecoder) Decode(payload []byte) ([]StreamEvent, error) {
 	case "ping":
 		return nil, nil
 	case "error":
-		msg := "anthropic stream error"
+		// Typed so the retry policy can read the provider's error type instead
+		// of parsing the rendered message (see errors.go): "overloaded_error"
+		// and "api_error" are retryable, "invalid_request_error" is not.
+		apiErr := &APIError{Family: "anthropic"}
 		if ev.Error != nil {
-			if ev.Error.Type != "" {
-				msg = "anthropic " + ev.Error.Type
-			}
-			if ev.Error.Message != "" {
-				msg += ": " + ev.Error.Message
-			}
+			apiErr.Type, apiErr.Message = ev.Error.Type, ev.Error.Message
 		}
-		return nil, fmt.Errorf("%s", msg)
+		return nil, apiErr
 	default:
 		// Unknown event types are ignored (forward-compatible).
 		return nil, nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,84 +10,89 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
-const supervisorScript = `#!/bin/sh
-IPC="${IPC:-/run/pigo-ipc}"
-export HOME="${HOME:-/home/pigo}"
-export PIGO_HOME="${PIGO_HOME:-/home/pigo/.pigo}"
-export PATH="${PATH:-/tmp:/usr/local/bin:/usr/bin:/bin}"
-export USER="${USER:-pigo}"
-export TERM="${TERM:-dumb}"
-cd /workspace 2>/dev/null || cd "${WORKSPACE:-.}" || true
-touch "$IPC/ready"
-while true; do
-  if [ -f "$IPC/start" ]; then
-    rm -f "$IPC/start" "$IPC/done" "$IPC/exit" "$IPC/cancel"
-    sh "$IPC/job.sh" > "$IPC/stdout" 2> "$IPC/stderr" &
-    job=$!
-    echo "$job" > "$IPC/pid"
-    while kill -0 "$job" 2>/dev/null; do
-      if [ -f "$IPC/cancel" ]; then
-        kill -9 "$job" 2>/dev/null
-        break
-      fi
-      sleep 0.05
-    done
-    wait "$job" 2>/dev/null
-    echo $? > "$IPC/exit"
-    touch "$IPC/done"
-  else
-    sleep 0.1
-  fi
-done
-`
+const (
+	maxSandboxOutput = 30_000
+	outputHeadBytes  = 12_000
+	outputTailBytes  = 12_000
+)
+
+// liveSandbox is one long-running shell inside a bwrap namespace. Commands
+// are sent over anonymous pipes, so sandbox processes cannot forge protocol
+// state by editing files in a shared IPC directory.
+type liveSandbox struct {
+	cmd    *exec.Cmd
+	stdin  *os.File
+	stdout *os.File
+	done   chan struct{}
+
+	closeOnce sync.Once
+	stopping  atomic.Bool
+}
 
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-func writeSupervisor(runDir string) error {
-	return os.WriteFile(filepath.Join(runDir, "supervisor.sh"), []byte(supervisorScript), 0o700)
-}
-
-func writeShellJob(runDir, script string) error {
-	if !strings.HasPrefix(script, "#!") {
-		script = "#!/bin/sh\n" + script
-	}
-	if !strings.HasSuffix(script, "\n") {
-		script += "\n"
-	}
-	return os.WriteFile(filepath.Join(runDir, "job.sh"), []byte(script), 0o700)
-}
-
-func processAlive(pid int) bool {
-	if pid <= 0 {
+func (l *liveSandbox) alive() bool {
+	if l == nil || l.cmd == nil || l.cmd.Process == nil || l.stopping.Load() {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil
+	select {
+	case <-l.done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (l *liveSandbox) closePipes() {
+	l.closeOnce.Do(func() {
+		if l.stdin != nil {
+			_ = l.stdin.Close()
+		}
+		if l.stdout != nil {
+			_ = l.stdout.Close()
+		}
+	})
+}
+
+func (l *liveSandbox) stop() {
+	if l == nil {
+		return
+	}
+	l.stopping.Store(true)
+	// Killing the bwrap monitor triggers --die-with-parent for the sandboxed
+	// command. Closing the pipes also unblocks an in-flight protocol read.
+	if l.cmd != nil && l.cmd.Process != nil {
+		_ = l.cmd.Process.Kill()
+	}
+	l.closePipes()
 }
 
 func (m *managedSession) liveAlive() bool {
-	if m.live == nil || m.live.Process == nil {
-		return false
-	}
-	return processAlive(m.live.Process.Pid)
+	return m.live.alive()
 }
 
 func (m *managedSession) stopLive() {
-	if m.live != nil {
-		killProcessGroup(m.live)
-		m.live = nil
+	live := m.live
+	m.live = nil
+	if live != nil {
+		live.stop()
 	}
-	clearIPC(m.paths.Run)
+	clearLegacyIPC(m.paths.Run)
 }
 
-func clearIPC(runDir string) {
-	for _, name := range []string{"start", "done", "exit", "cancel", "pid", "ready", "stdout"} {
+func clearLegacyIPC(runDir string) {
+	for _, name := range []string{
+		"supervisor.sh", "job.sh", "start", "done", "exit", "cancel",
+		"pid", "ready", "stdout", "stderr", "supervisor.log",
+	} {
 		_ = os.Remove(filepath.Join(runDir, name))
 	}
 }
@@ -95,138 +101,218 @@ func (s *apiServer) ensureLive(managed *managedSession, spec RunSpec) error {
 	if managed.liveAlive() {
 		return nil
 	}
-	managed.live = nil
+	managed.stopLive()
 	if err := os.MkdirAll(managed.paths.Run, 0o700); err != nil {
 		return err
 	}
-	clearIPC(managed.paths.Run)
-	if err := writeSupervisor(managed.paths.Run); err != nil {
-		return err
-	}
-	argv, err := s.sandbox.liveArgv(spec, managed.paths.Run)
+	clearLegacyIPC(managed.paths.Run)
+	argv, err := s.sandbox.liveArgv(spec)
 	if err != nil {
 		return err
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	logFile, err := os.OpenFile(filepath.Join(managed.paths.Run, "supervisor.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
+		return fmt.Errorf("create sandbox stdin: %w", err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		return fmt.Errorf("create sandbox stdout: %w", err)
+	}
+	logFile, err := os.OpenFile(filepath.Join(managed.paths.Run, "sandbox.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
 		return err
 	}
-	cmd.Stdout = logFile
+	cmd.Stdin = stdinR
+	cmd.Stdout = stdoutW
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = logFile.Close()
 		return fmt.Errorf("start sandbox: %w", err)
 	}
+	// The child inherited its copies during Start.
+	_ = stdinR.Close()
+	_ = stdoutW.Close()
+	live := &liveSandbox{
+		cmd:    cmd,
+		stdin:  stdinW,
+		stdout: stdoutR,
+		done:   make(chan struct{}),
+	}
+	managed.live = live
 	go func() {
 		_ = cmd.Wait()
 		_ = logFile.Close()
+		close(live.done)
 		managed.mu.Lock()
-		if managed.live == cmd {
+		if managed.live == live {
+			live.closePipes()
 			managed.live = nil
 		}
 		managed.mu.Unlock()
 	}()
-	managed.live = cmd
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(managed.paths.Run, "ready")); err == nil {
-			return nil
-		}
-		if !processAlive(cmd.Process.Pid) {
-			managed.stopLive()
-			return fmt.Errorf("sandbox exited before becoming ready")
-		}
-		time.Sleep(50 * time.Millisecond)
+
+	probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := runLiveJob(probeCtx, live, ":"); err != nil {
+		managed.stopLive()
+		return fmt.Errorf("sandbox did not become ready: %w", err)
 	}
-	managed.stopLive()
-	return fmt.Errorf("sandbox supervisor did not become ready")
+	return nil
 }
 
-type ipcResult struct {
+type shellResult struct {
 	Stdout string
 	Stderr string
 	Exit   int
 }
 
-func runIPCJob(ctx context.Context, runDir, script string) (ipcResult, error) {
-	if err := writeShellJob(runDir, script); err != nil {
-		return ipcResult{}, err
+func runLiveJob(ctx context.Context, live *liveSandbox, command string) (shellResult, error) {
+	if !live.alive() {
+		return shellResult{}, fmt.Errorf("sandbox is not running")
 	}
-	stdoutPath := filepath.Join(runDir, "stdout")
-	_ = os.Remove(stdoutPath)
-	if err := syscall.Mkfifo(stdoutPath, 0o600); err != nil {
-		return ipcResult{}, fmt.Errorf("stdout fifo: %w", err)
+	token, err := randomID()
+	if err != nil {
+		return shellResult{}, fmt.Errorf("create command marker: %w", err)
 	}
-	_ = os.Remove(filepath.Join(runDir, "done"))
-	_ = os.Remove(filepath.Join(runDir, "exit"))
-	_ = os.Remove(filepath.Join(runDir, "cancel"))
+	marker := []byte("\x1ePIGO_DONE_" + token + ":")
+	// The command gets /dev/null as stdin so it cannot consume the persistent
+	// shell's control stream. A separate sh -c also prevents cd/export/exit
+	// from mutating or terminating that shell.
+	script := "/bin/sh -c " + shQuote(command) + " </dev/null 2>&1\n" +
+		"__pigo_status=$?\n" +
+		"printf '\\036PIGO_DONE_" + token + ":%d\\037\\n' \"$__pigo_status\"\n"
 
-	type openRes struct {
-		f   *os.File
-		err error
-	}
-	opened := make(chan openRes, 1)
-	go func() {
-		f, err := os.OpenFile(stdoutPath, os.O_RDONLY, 0)
-		opened <- openRes{f, err}
-	}()
-	if err := os.WriteFile(filepath.Join(runDir, "start"), []byte("1\n"), 0o600); err != nil {
-		return ipcResult{}, err
-	}
-
-	var file *os.File
-	select {
-	case <-ctx.Done():
-		_ = os.WriteFile(filepath.Join(runDir, "cancel"), []byte("1\n"), 0o600)
-		return ipcResult{}, ctx.Err()
-	case res := <-opened:
-		if res.err != nil {
-			return ipcResult{}, res.err
-		}
-		file = res.f
-	}
-	defer file.Close()
-
-	stop := context.AfterFunc(ctx, func() {
-		_ = os.WriteFile(filepath.Join(runDir, "cancel"), []byte("1\n"), 0o600)
-	})
-	stdoutBytes, readErr := io.ReadAll(file)
-	stop()
-
-	deadline := time.Now().Add(15 * time.Second)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
-	}
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(runDir, "done")); err == nil {
-			break
-		}
+	cancelWatcher := context.AfterFunc(ctx, live.stop)
+	if _, err := io.WriteString(live.stdin, script); err != nil {
+		cancelWatcher()
+		live.stop()
 		if ctx.Err() != nil {
-			break
+			return shellResult{}, ctx.Err()
 		}
-		time.Sleep(20 * time.Millisecond)
+		return shellResult{}, fmt.Errorf("write sandbox command: %w", err)
 	}
-	exitText, _ := os.ReadFile(filepath.Join(runDir, "exit"))
-	stderrText, _ := os.ReadFile(filepath.Join(runDir, "stderr"))
-	code, _ := strconv.Atoi(strings.TrimSpace(string(exitText)))
-	out := ipcResult{
-		Stdout: string(stdoutBytes),
-		Stderr: string(stderrText),
-		Exit:   code,
+
+	var output boundedSandboxOutput
+	code, readErr := readCommandResult(live.stdout, marker, &output)
+	watcherStopped := cancelWatcher()
+	result := shellResult{Stdout: output.String(), Exit: code}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return result, ctxErr
+	}
+	if !watcherStopped {
+		return result, context.Canceled
 	}
 	if readErr != nil {
-		return out, readErr
+		live.stop()
+		return result, readErr
 	}
-	if ctx.Err() != nil {
-		return out, ctx.Err()
+	return result, nil
+}
+
+func readCommandResult(r io.Reader, marker []byte, output io.Writer) (int, error) {
+	buf := make([]byte, 32*1024)
+	pending := make([]byte, 0, len(marker)+32)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			pending = append(pending, buf[:n]...)
+			for {
+				idx := bytes.Index(pending, marker)
+				if idx >= 0 {
+					if idx > 0 {
+						_, _ = output.Write(pending[:idx])
+					}
+					status := pending[idx+len(marker):]
+					end := bytes.IndexByte(status, '\x1f')
+					if end < 0 {
+						// A forged/incomplete marker must not retain unbounded
+						// output while waiting for a terminator.
+						if len(status) > 16 {
+							_, _ = output.Write(pending[:idx+1])
+							pending = append(pending[:0], pending[idx+1:]...)
+							continue
+						}
+						pending = pending[idx:]
+						break
+					}
+					code, err := strconv.Atoi(string(status[:end]))
+					if err != nil {
+						return 0, fmt.Errorf("invalid sandbox exit status: %w", err)
+					}
+					return code, nil
+				}
+
+				keep := len(marker) - 1
+				if len(pending) <= keep {
+					break
+				}
+				flush := len(pending) - keep
+				_, _ = output.Write(pending[:flush])
+				pending = append(pending[:0], pending[flush:]...)
+				break
+			}
+		}
+		if readErr != nil {
+			if len(pending) > 0 {
+				_, _ = output.Write(pending)
+			}
+			if readErr == io.EOF {
+				return 0, fmt.Errorf("sandbox exited before reporting command status")
+			}
+			return 0, fmt.Errorf("read sandbox output: %w", readErr)
+		}
 	}
-	return out, nil
+}
+
+type boundedSandboxOutput struct {
+	full      []byte
+	head      []byte
+	tail      []byte
+	truncated bool
+}
+
+func (w *boundedSandboxOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	if !w.truncated {
+		w.full = append(w.full, p...)
+		if len(w.full) <= maxSandboxOutput {
+			return n, nil
+		}
+		w.truncated = true
+		w.head = append(w.head, w.full[:outputHeadBytes]...)
+		start := len(w.full) - outputTailBytes
+		w.tail = append(w.tail, w.full[start:]...)
+		w.full = nil
+		return n, nil
+	}
+	w.tail = append(w.tail, p...)
+	if len(w.tail) > outputTailBytes {
+		w.tail = append(w.tail[:0], w.tail[len(w.tail)-outputTailBytes:]...)
+	}
+	return n, nil
+}
+
+func (w *boundedSandboxOutput) String() string {
+	if !w.truncated {
+		return string(w.full)
+	}
+	return string(w.head) + "\n[truncated]\n" + string(w.tail)
 }
 
 func (s *apiServer) reapLoop() {
-	if s.config.idleTimeout <= 0 {
+	if s.config.idleTimeout <= 0 && s.config.emptySessionTTL <= 0 {
 		return
 	}
 	ticker := time.NewTicker(10 * time.Second)
@@ -253,10 +339,14 @@ func (s *apiServer) reapIdle() {
 		if !m.mu.TryLock() {
 			continue
 		}
-		idle := now.Sub(m.meta.LastUsed) >= s.config.idleTimeout
+		idle := s.config.idleTimeout > 0 && now.Sub(m.meta.LastUsed) >= s.config.idleTimeout
 		if idle && !m.busy && m.liveAlive() {
 			m.stopLive()
 		}
+		id := m.meta.ID
 		m.mu.Unlock()
+		if s.config.emptySessionTTL > 0 {
+			s.removeExpiredEmptySession(id, m, now)
+		}
 	}
 }

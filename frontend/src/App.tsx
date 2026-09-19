@@ -9,8 +9,14 @@ import {
   useLocalRuntime,
   type ChatModelAdapter,
   type ThreadMessage,
+  type ThreadMessageLike,
   type Unstable_SlashCommand,
 } from "@assistant-ui/react";
+import { AdminSettings, AdminUsers } from "./admin";
+import { navigate, navigateEvent, parsePath, type Route } from "./route";
+import { Models } from "./models";
+import { Providers } from "./providers";
+import { MarkdownText } from "./markdown";
 import {
   createContext,
   useContext,
@@ -18,30 +24,49 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import {
+  APIError,
   PigoAPI,
+  type HistoryMessage,
+  type CustomModelInfo,
   type ModelInfo,
+  type ProviderInfo,
   type SessionInfo,
   type SessionSettings,
   type SlashCommandInfo,
+  type UserInfo,
   type WorkspaceEntry,
 } from "./api";
 
 type PigoContextValue = {
   api: PigoAPI;
+  user: UserInfo | null;
+  authReady: boolean;
   session: SessionInfo | null;
+  sessions: SessionInfo[];
   commands: SlashCommandInfo[];
   models: ModelInfo[];
+  modelsError: string;
+  reloadModels(): Promise<void>;
   error: string;
+  // notice is transient run status (currently a retry after a rate-limited or
+  // overloaded request). Empty when there is nothing to say.
+  notice: string;
   theme: Theme;
   setTheme(theme: Theme): void;
   commandBrowserOpen: boolean;
   setCommandBrowserOpen(open: boolean): void;
-  connect(token: string): Promise<void>;
+  login(username: string, password: string): Promise<void>;
+  register(username: string, password: string, registrationToken?: string): Promise<void>;
+  logout(): Promise<void>;
   saveSettings(settings: SessionSettings): Promise<void>;
   newSession(): Promise<void>;
+  selectSession(id: string): Promise<void>;
+  deleteSession(id: string): Promise<void>;
 };
 
 type Theme = "dark" | "light";
@@ -55,14 +80,40 @@ function textOf(message: ThreadMessage): string {
     .join("\n");
 }
 
+function currentSessionStorageKey(userID: string) {
+  return `pigo.currentSession.${userID}`;
+}
+
+function toThreadMessages(messages: HistoryMessage[]): ThreadMessageLike[] {
+  return messages
+    .filter(
+      (message): message is HistoryMessage & { role: "user" | "assistant"; content: string } =>
+        (message.role === "user" || message.role === "assistant") && Boolean(message.content),
+    )
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: [{ type: "text" as const, text: message.content }],
+      createdAt: new Date(message.createdAt),
+      ...(message.role === "assistant"
+        ? { status: { type: "complete" as const, reason: "stop" as const } }
+        : {}),
+    }));
+}
+
 function RuntimeProvider({ children }: { children: ReactNode }) {
   const apiRef = useRef<PigoAPI | null>(null);
   if (!apiRef.current) apiRef.current = new PigoAPI();
   const api = apiRef.current;
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [session, setSession] = useState<SessionInfo | null>(null);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [commands, setCommands] = useState<SlashCommandInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsError, setModelsError] = useState("");
   const [error, setError] = useState("");
+  const [runNotice, setRunNotice] = useState("");
   const [commandBrowserOpen, setCommandBrowserOpen] = useState(false);
   const [theme, setThemeState] = useState<Theme>(() => {
     let initial: Theme = "dark";
@@ -89,6 +140,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     () => ({
       async *run({ messages, abortSignal }) {
         setError("");
+        setRunNotice("");
         try {
           const prompt = textOf(messages.at(-1)!);
           if (prompt.trim() === "/help") {
@@ -99,7 +151,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
             return;
           }
           let emitted = false;
-          for await (const text of api.stream(prompt, abortSignal)) {
+          for await (const text of api.stream(prompt, abortSignal, setRunNotice)) {
             emitted = true;
             yield { content: [{ type: "text", text }] };
           }
@@ -107,11 +159,15 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
         } catch (cause) {
           setError(cause instanceof Error ? cause.message : String(cause));
           throw cause;
+        } finally {
+          // The wait is over whether the run succeeded, failed or was aborted.
+          setRunNotice("");
         }
-        void Promise.all([api.sessionInfo(), api.commands()])
-          .then(([nextSession, nextCommands]) => {
+        void Promise.all([api.sessionInfo(), api.commands(), api.sessions()])
+          .then(([nextSession, nextCommands, nextSessions]) => {
             setSession(nextSession);
             setCommands(nextCommands);
+            setSessions(nextSessions);
           })
           .catch(() => undefined);
       },
@@ -120,37 +176,86 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
   );
   const runtime = useLocalRuntime(adapter);
 
-  async function loadSession() {
+  async function loadModels() {
+    setModelsError("");
+    try {
+      setModels(await api.models());
+    } catch (cause) {
+      setModelsError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function openSession(next: SessionInfo, currentUser: UserInfo) {
+    api.selectSession(next);
+    setSession(next);
+    try {
+      window.localStorage.setItem(currentSessionStorageKey(currentUser.id), next.id);
+    } catch {
+      // The selected session still works for this page lifetime.
+    }
+    const history = await api.history(next.id);
+    runtime.thread.reset(toThreadMessages(history));
+    try {
+      setCommands(await api.commands());
+    } catch {
+      setCommands([]);
+    }
+  }
+
+  async function restoreUser(currentUser: UserInfo) {
     setError("");
     try {
-      const [next, nextCommands, nextModels] = await Promise.all([
-        api.ensureSession(),
-        api.commands(),
-        api.models(),
-      ]);
-      setSession(next);
-      setCommands(nextCommands);
-      setModels(nextModels);
-      return true;
+      let savedID = "";
+      try {
+        savedID = window.localStorage.getItem(currentSessionStorageKey(currentUser.id)) ?? "";
+      } catch {
+        // Fall back to the newest server-side session.
+      }
+      let selected: SessionInfo | null = null;
+      if (savedID) {
+        try {
+          selected = await api.getSession(savedID);
+        } catch (cause) {
+          if (!(cause instanceof APIError) || cause.status !== 404) throw cause;
+        }
+      }
+      let available = await api.sessions();
+      if (!selected && available.length > 0) selected = await api.getSession(available[0].id);
+      if (!selected) {
+        selected = await api.createSession();
+        available = [selected, ...available];
+      }
+      setSessions(available.some((item) => item.id === selected.id) ? available : [selected, ...available]);
+      await openSession(selected, currentUser);
+      void loadModels();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-      return false;
     }
   }
 
   useEffect(() => {
-    void loadSession();
+    void api
+      .me()
+      .then(async (currentUser) => {
+        setUser(currentUser);
+        await restoreUser(currentUser);
+      })
+      .catch((cause) => {
+        if (!(cause instanceof APIError) || cause.status !== 401) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      })
+      .finally(() => setAuthReady(true));
   }, []);
 
-  async function connect(token: string) {
-    api.setToken(token);
-    if (!(await loadSession())) throw new Error("连接失败");
-  }
-
-  async function saveSettings(settings: SessionSettings) {
+  async function authenticate(mode: "login" | "register", username: string, password: string, registrationToken = "") {
     setError("");
     try {
-      setSession(await api.updateSession(settings));
+      const currentUser =
+        mode === "login" ? await api.login(username, password) : await api.register(username, password, registrationToken);
+      setUser(currentUser);
+      setAuthReady(true);
+      await restoreUser(currentUser);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
@@ -158,34 +263,118 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  async function newSession() {
+  async function login(username: string, password: string) {
+    await authenticate("login", username, password);
+  }
+
+  async function register(username: string, password: string, registrationToken = "") {
+    await authenticate("register", username, password, registrationToken);
+  }
+
+  async function logout() {
+    await api.logout();
+    api.selectSession(null);
     runtime.thread.reset();
-    setCommands([]);
+    setUser(null);
     setSession(null);
+    setSessions([]);
+    setCommands([]);
+    setModels([]);
+    setModelsError("");
+    setError("");
+  }
+
+  async function saveSettings(settings: SessionSettings) {
     setError("");
     try {
-      await api.reset();
-    } catch {
-      // The local reset is still useful if the old server session expired.
+      const updated = await api.updateSession(settings);
+      setSession(updated);
+      setSessions((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      throw cause;
     }
-    await loadSession();
+  }
+
+  // newSession and selectSession switch the visible conversation, so they also
+  // show it: called from the settings page, the thread is not rendered and a
+  // switch that stays there looks like a button that does nothing — while
+  // quietly creating an empty session per click. Navigation lives here rather
+  // than at each button so every caller (top bar, history drawer, its "新建"
+  // button) gets it. openSession itself does not navigate: it also runs on a
+  // cold load of /settings/..., which must stay where the URL says.
+  async function newSession() {
+    if (!user) return;
+    setError("");
+    try {
+      const created = await api.createSession();
+      setSessions((current) => [created, ...current]);
+      await openSession(created, user);
+      navigate("/");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function selectSession(id: string) {
+    if (!user) return;
+    // Already open: nothing to load, but still show it.
+    if (session?.id === id) {
+      navigate("/");
+      return;
+    }
+    setError("");
+    try {
+      await openSession(await api.getSession(id), user);
+      navigate("/");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
+    }
+  }
+
+  async function deleteSession(id: string) {
+    if (!user) return;
+    setError("");
+    await api.deleteSession(id);
+    const remaining = sessions.filter((item) => item.id !== id);
+    setSessions(remaining);
+    if (session?.id !== id) return;
+    if (remaining.length > 0) {
+      await openSession(await api.getSession(remaining[0].id), user);
+    } else {
+      const created = await api.createSession();
+      setSessions([created]);
+      await openSession(created, user);
+    }
   }
 
   return (
     <PigoContext.Provider
       value={{
         api,
+        user,
+        authReady,
         session,
+        sessions,
         commands,
         models,
+        modelsError,
+        reloadModels: loadModels,
         error,
+        notice: runNotice,
         theme,
         setTheme,
         commandBrowserOpen,
         setCommandBrowserOpen,
-        connect,
+        login,
+        register,
+        logout,
         saveSettings,
         newSession,
+        selectSession,
+        deleteSession,
       }}
     >
       <AssistantRuntimeProvider runtime={runtime}>
@@ -204,13 +393,113 @@ function usePigo() {
 export function App() {
   return (
     <RuntimeProvider>
-      <Shell />
+      <AuthGate />
     </RuntimeProvider>
   );
 }
 
+function AuthGate() {
+  const { user, authReady } = usePigo();
+  if (!authReady) {
+    return <div className="auth-loading"><div className="auth-logo">π</div><span>正在恢复登录状态…</span></div>;
+  }
+  return user ? <Shell /> : <AuthScreen />;
+}
+
+function AuthScreen() {
+  const { login, register, error, theme, setTheme } = usePigo();
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [registrationToken, setRegistrationToken] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setLocalError("");
+    if (mode === "register" && password !== confirmPassword) {
+      setLocalError("两次输入的密码不一致");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      if (mode === "login") await login(username, password);
+      else await register(username, password, registrationToken);
+    } catch {
+      // The provider exposes the server error next to the form.
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-page">
+      <button
+        className="icon-button auth-theme"
+        type="button"
+        aria-label="切换主题"
+        onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+      >
+        <ThemeIcon theme={theme} />
+      </button>
+      <section className="auth-card">
+        <div className="auth-brand"><span>π</span><strong>pigo</strong></div>
+        <div className="auth-heading">
+          <span className="eyebrow">PIGO AGENT WORKSPACE</span>
+          <h1>{mode === "login" ? "欢迎回来" : "创建你的账号"}</h1>
+          <p>{mode === "login" ? "登录后继续之前的会话与工作区。" : "账号会隔离你的会话、历史和工作区。"}</p>
+        </div>
+        <div className="auth-tabs" role="tablist">
+          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setLocalError(""); }}>登录</button>
+          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setLocalError(""); }}>注册</button>
+        </div>
+        <form className="auth-form" onSubmit={(event) => void submit(event)}>
+          <label>用户名
+            <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="3-32 位字母、数字或 _ . -" minLength={3} maxLength={32} required autoFocus />
+          </label>
+          <label>密码
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="至少 8 个字符" minLength={8} maxLength={72} required />
+          </label>
+          {mode === "register" && (
+            <>
+              <label>确认密码
+                <input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" placeholder="再次输入密码" minLength={8} maxLength={72} required />
+              </label>
+              <label>服务器注册 Token <small>注册账号时需要，登录后不再使用</small>
+                <input type="password" value={registrationToken} onChange={(event) => setRegistrationToken(event.target.value)} autoComplete="off" placeholder="例如启动时配置的 PIGO_SERVER_TOKEN" />
+              </label>
+            </>
+          )}
+          {(localError || error) && <div className="auth-error">{localError || error}</div>}
+          <button className="primary-button auth-submit" type="submit" disabled={submitting}>
+            {submitting ? "请稍候…" : mode === "login" ? "登录并继续" : "注册并开始"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function useRoute(): Route {
+  const [route, setRoute] = useState<Route>(() => parsePath(window.location.pathname));
+  useEffect(() => {
+    const sync = () => setRoute(parsePath(window.location.pathname));
+    window.addEventListener("popstate", sync);
+    window.addEventListener(navigateEvent, sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener(navigateEvent, sync);
+    };
+  }, []);
+  return route;
+}
+
+
 function Shell() {
   const {
+    user,
     session,
     error,
     theme,
@@ -218,8 +507,11 @@ function Shell() {
     commandBrowserOpen,
     setCommandBrowserOpen,
     newSession,
+    logout,
   } = usePigo();
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const route = useRoute();
+  const onSettings = route.name === "settings";
 
   return (
     <main className="app-shell">
@@ -239,7 +531,10 @@ function Shell() {
           </span>
         </div>
         <div className="topbar-spacer" />
-        {session && <span className="model-pill">{session.model}</span>}
+        {session && <ModelPicker />}
+        <button className="secondary-button history-button" type="button" onClick={() => setHistoryOpen(true)}>
+          历史会话
+        </button>
         <button
           className="icon-button"
           type="button"
@@ -250,26 +545,240 @@ function Shell() {
           <ThemeIcon theme={theme} />
         </button>
         <button
-          className="icon-button"
+          className={onSettings ? "icon-button icon-button-active" : "icon-button"}
           type="button"
-          aria-label="打开设置"
-          title="设置"
-          onClick={() => setSettingsOpen(true)}
+          aria-label={onSettings ? "返回对话" : "打开设置"}
+          title={onSettings ? "返回对话" : "设置"}
+          aria-pressed={onSettings}
+          onClick={() => navigate(onSettings ? "/" : "/settings")}
         >
           <SettingsIcon />
         </button>
         <button className="secondary-button" type="button" onClick={() => void newSession()}>
           新会话
         </button>
+        <button className="user-button" type="button" title="退出登录" onClick={() => void logout()}>
+          <span>{user?.username.slice(0, 1).toUpperCase()}</span>
+          <small>{user?.username}</small>
+        </button>
       </header>
-      <Thread />
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {onSettings ? <SettingsPage tab={route.tab} /> : <Thread />}
+      <HistoryDrawer open={historyOpen} onClose={() => setHistoryOpen(false)} />
       <CommandBrowser
         open={commandBrowserOpen}
         onClose={() => setCommandBrowserOpen(false)}
       />
     </main>
   );
+}
+
+// modelGroups orders the picker the same way the server orders the list.
+const modelGroups = [
+  { source: "custom", title: "本服务的模型" },
+  { source: "free", title: "OpenRouter 免费" },
+  { source: "preset", title: "已配置 Key" },
+] as const;
+
+// ModelPicker switches the conversation's model from the top bar, without a
+// trip to the settings page. It reads the same /api/models list as the settings
+// picker and /models, so the three never disagree about what is available.
+function ModelPicker() {
+  const { session, models, modelsError, reloadModels, saveSettings } = usePigo();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    // Close on a click anywhere else, or Escape.
+    const onPointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (!session) return null;
+  const needle = query.trim().toLowerCase();
+  const matches = models.filter(
+    (item) =>
+      !needle ||
+      item.id.toLowerCase().includes(needle) ||
+      item.label.toLowerCase().includes(needle) ||
+      item.provider.toLowerCase().includes(needle),
+  );
+
+  async function choose(id: string, providerName: string) {
+    if (!session) return;
+    setBusy(true);
+    try {
+      await saveSettings({ model: id, provider: providerName, thinking: session.thinking ?? "medium" });
+      setOpen(false);
+      setQuery("");
+    } catch {
+      // saveSettings has already surfaced the error in the status line.
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="model-picker" ref={rootRef}>
+      <button
+        type="button"
+        className="model-pill model-pill-button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={`${session.model} · ${session.provider}（点击切换模型）`}
+        onClick={() => {
+          setOpen(!open);
+          if (!open && models.length === 0) void reloadModels();
+        }}
+      >
+        {session.model} <span aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="model-menu" role="listbox" aria-label="切换模型">
+          <input
+            className="settings-input model-menu-search"
+            placeholder="搜索模型 / provider"
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <div className="model-menu-list">
+            {modelGroups.map((group) => {
+              const items = matches.filter((item) => (item.source ?? "free") === group.source);
+              if (items.length === 0) return null;
+              return (
+                <div key={group.source} className="model-menu-group">
+                  <span className="eyebrow">{group.title}</span>
+                  {items.map((item) => {
+                    const current = item.id === session.model;
+                    return (
+                      <button
+                        key={`${item.provider}:${item.id}`}
+                        type="button"
+                        role="option"
+                        aria-selected={current}
+                        className={current ? "model-menu-item current" : "model-menu-item"}
+                        disabled={busy}
+                        onClick={() => void choose(item.id, item.provider)}
+                      >
+                        <span className="model-menu-label">{item.label}</span>
+                        <span className="model-menu-meta">
+                          {item.provider}
+                          {current ? " · 当前" : ""}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+            {matches.length === 0 && (
+              <p className="model-menu-empty">
+                {modelsError ? `模型列表加载失败：${modelsError}` : models.length === 0 ? "正在加载…" : "没有匹配的模型"}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="model-menu-manage"
+            onClick={() => {
+              setOpen(false);
+              navigate("/settings/models");
+            }}
+          >
+            管理模型…
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HistoryDrawer({ open, onClose }: { open: boolean; onClose(): void }) {
+  const { session, sessions, selectSession, deleteSession, newSession } = usePigo();
+  const [busyID, setBusyID] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  async function choose(id: string) {
+    setBusyID(id);
+    try {
+      await selectSession(id);
+      onClose();
+    } finally {
+      setBusyID("");
+    }
+  }
+
+  async function remove(event: ReactMouseEvent, item: SessionInfo) {
+    event.stopPropagation();
+    if (!window.confirm(`确定删除“${item.title || "新会话"}”？对话记录和工作区文件都会被删除。`)) return;
+    setBusyID(item.id);
+    try {
+      await deleteSession(item.id);
+    } finally {
+      setBusyID("");
+    }
+  }
+
+  return (
+    <div className="history-layer">
+      <button className="settings-backdrop" type="button" aria-label="关闭历史会话" onClick={onClose} />
+      <aside className="history-drawer" role="dialog" aria-modal="true" aria-label="历史会话">
+        <header className="settings-header">
+          <div><span className="eyebrow">CONVERSATIONS</span><h2>历史会话</h2></div>
+          <button className="icon-button close-button" type="button" onClick={onClose} aria-label="关闭">×</button>
+        </header>
+        <div className="history-actions">
+          <button className="primary-button full-button" type="button" onClick={() => void newSession().then(onClose)}>＋ 新建会话</button>
+        </div>
+        <div className="history-list">
+          {sessions.map((item) => (
+            <div key={item.id} className={`history-item ${item.id === session?.id ? "active" : ""}`}>
+              <button className="history-open" type="button" disabled={Boolean(busyID)} onClick={() => void choose(item.id)}>
+                <span className="history-item-copy">
+                  <strong>{item.title || "新会话"}</strong>
+                  <small>{formatSessionTime(item.lastUsed)} · {item.model}</small>
+                </span>
+              </button>
+              <button className="history-delete" type="button" disabled={Boolean(busyID)} aria-label="删除会话" title="删除会话" onClick={(event) => void remove(event, item)}>×</button>
+            </div>
+          ))}
+          {sessions.length === 0 && <div className="history-empty">还没有历史会话</div>}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function formatSessionTime(value: string) {
+  const date = new Date(value);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) {
+    return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 }
 
 function ThemeIcon({ theme }: { theme: Theme }) {
@@ -297,40 +806,87 @@ function SettingsIcon() {
   );
 }
 
-function SettingsDrawer({ open, onClose }: { open: boolean; onClose(): void }) {
-  const { session, commands, models, error, connect, saveSettings } = usePigo();
+// The settings page. Each panel is a hash route (#/settings/<tab>), so a
+// specific panel can be linked to and the back button leaves settings rather
+// than the browser.
+type SettingsTab = { key: string; label: string };
+type SettingsGroup = { title: string; adminOnly?: boolean; tabs: SettingsTab[] };
+
+// One panel per route, grouped by who it belongs to. The administrator's four
+// concerns are separate panels rather than one console, so nothing here is
+// taller than a screen.
+// Organised by the object being configured, not by who owns it: a provider is
+// one row whoever supplies its key, and a model is one row whoever added it.
+// Only the two things that are genuinely deployment-wide get an admin group.
+const settingsGroups: SettingsGroup[] = [
+  {
+    title: "配置",
+    tabs: [
+      { key: "session", label: "会话" },
+      { key: "providers", label: "Provider" },
+      { key: "models", label: "模型" },
+      { key: "workspace", label: "工作区" },
+      { key: "runtime", label: "运行状态" },
+    ],
+  },
+  {
+    title: "管理",
+    adminOnly: true,
+    tabs: [
+      { key: "admin", label: "部署" },
+      { key: "admin-users", label: "用户" },
+    ],
+  },
+];
+
+function SettingsPage({ tab }: { tab: string }) {
+  const { api, user, session, commands, models, modelsError, reloadModels, error, saveSettings } = usePigo();
   const [model, setModel] = useState("");
   const [thinking, setThinking] = useState("medium");
-  const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
+  const [customModels, setCustomModels] = useState<CustomModelInfo[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
 
   useEffect(() => {
-    if (!open) return;
     setModel(session?.model ?? "");
     setThinking(session?.thinking ?? "medium");
     setNotice("");
-  }, [open, session?.model, session?.thinking]);
+    void refreshCustomModels();
+    void refreshProviders();
+  }, [session?.model, session?.thinking]);
 
+  // Escape returns to the conversation, matching what the drawer used to do.
   useEffect(() => {
-    if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+    const backOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") navigate("/");
     };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [open, onClose]);
-
-  if (!open) return null;
+    window.addEventListener("keydown", backOnEscape);
+    return () => window.removeEventListener("keydown", backOnEscape);
+  }, []);
   const skillCount = commands.filter((command) => command.source === "skill").length;
   const unavailableCount = commands.filter((command) => !command.available).length;
+  // /api/models 要等 OpenRouter 实时拉取，可能很慢；自定义模型来自本地存储，
+  // 直接合并进候选列表，保证添加后立刻可选。
+  const datalistModels = [...models];
+  {
+    const known = new Set(models.map((item) => item.id));
+    for (const item of customModels) {
+      if (!item.expired && !known.has(item.id)) {
+        datalistModels.push({ id: item.id, label: `${item.label} · 自定义`, provider: item.provider, source: "custom" });
+      }
+    }
+  }
+  const modelChoiceIds = new Set(datalistModels.map((item) => item.id));
 
   async function applySessionSettings() {
-    if (!model.trim()) return;
+    const modelID = model.trim();
+    if (!modelID) return;
     setSaving(true);
     setNotice("");
     try {
-      await saveSettings({ model: model.trim(), thinking });
+      const selected = datalistModels.find((item) => item.id === modelID);
+      await saveSettings({ model: modelID, provider: selected?.provider, thinking });
       setNotice("会话设置已更新，将从下一轮开始生效。");
     } catch {
       setNotice("");
@@ -339,38 +895,57 @@ function SettingsDrawer({ open, onClose }: { open: boolean; onClose(): void }) {
     }
   }
 
-  async function applyToken() {
-    setSaving(true);
-    setNotice("");
+  // The provider list feeds the model panel's dropdown, so it has to be
+  // reloaded when the Provider panel adds one — the panels share this component
+  // instance and switching tabs does not remount it.
+  async function refreshProviders() {
     try {
-      await connect(token);
-      setNotice(
-        token.trim()
-          ? "连接凭据已保存到当前浏览器。"
-          : "已清除浏览器中保存的连接凭据。",
-      );
+      setProviders(await api.providers());
     } catch {
-      setNotice("");
-    } finally {
-      setSaving(false);
+      setProviders([]);
     }
   }
 
-  return (
-    <div className="settings-layer">
-      <button className="settings-backdrop" type="button" aria-label="关闭设置" onClick={onClose} />
-      <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="设置">
-        <header className="settings-header">
-          <div>
-            <span className="eyebrow">PIGO WEB</span>
-            <h2>设置</h2>
-          </div>
-          <button className="icon-button close-button" type="button" onClick={onClose} aria-label="关闭设置">
-            ×
-          </button>
-        </header>
+  async function refreshCustomModels() {
+    try {
+      setCustomModels(await api.customModels());
+    } catch {
+      setCustomModels([]);
+    }
+  }
 
-        <div className="settings-content">
+
+
+  const visibleGroups = settingsGroups.filter((group) => !group.adminOnly || user?.admin);
+  const visibleKeys = visibleGroups.flatMap((group) => group.tabs.map((item) => item.key));
+  const active = visibleKeys.includes(tab) ? tab : "session";
+
+  return (
+    <div className="settings-page">
+      <nav className="settings-nav" aria-label="设置分组">
+        {visibleGroups.map((group) => (
+          <div key={group.title} className="settings-nav-group">
+            <span className="eyebrow">{group.title}</span>
+            {group.tabs.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={item.key === active ? "settings-nav-item active" : "settings-nav-item"}
+                aria-current={item.key === active ? "page" : undefined}
+                onClick={() => navigate(`/settings/${item.key}`)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        ))}
+        <button type="button" className="settings-nav-back" onClick={() => navigate("/")}>
+          ← 返回对话
+        </button>
+      </nav>
+
+      <div className="settings-pane">
+        {active === "session" && (
           <section className="settings-section">
             <div className="section-heading">
               <div>
@@ -379,62 +954,65 @@ function SettingsDrawer({ open, onClose }: { open: boolean; onClose(): void }) {
               </div>
               <span className="section-icon">AI</span>
             </div>
-            <label className="field-label" htmlFor="model-setting">模型</label>
-            <input
-              id="model-setting"
-              className="settings-input"
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              list="pigo-models"
-              placeholder="输入模型 ID"
-            />
-            <datalist id="pigo-models">
-              {models.map((item) => (
-                <option key={`${item.provider}:${item.id}`} value={item.id}>{`${item.label} · ${item.provider}`}</option>
-              ))}
-            </datalist>
+<label className="field-label" htmlFor="model-setting">模型</label>
+            <select
+            id="model-setting"
+            className="settings-input settings-select"
+            value={model}
+            onChange={(event) => setModel(event.target.value)}
+            >
+            {/* Grouped by source, the same way the top-bar picker groups them. */}
+            {modelGroups.map((group) => {
+              const items = datalistModels.filter((item) => (item.source ?? "free") === group.source);
+              if (items.length === 0) return null;
+              return (
+                <optgroup key={group.source} label={group.title}>
+                  {items.map((item) => (
+                    <option key={`${item.provider}:${item.id}`} value={item.id}>{`${item.label} · ${item.provider}`}</option>
+                  ))}
+                </optgroup>
+              );
+            })}
+            {model && !modelChoiceIds.has(model) && (
+            <option value={model}>{`${model} · 当前（不在目录中）`}</option>
+            )}
+            </select>
+            {modelsError && <p className="credential-note">OpenRouter 免费目录暂时不可用：{modelsError}。其它模型不受影响，仍可在下拉中选择。</p>}
             <label className="field-label" htmlFor="thinking-setting">推理强度</label>
             <select
-              id="thinking-setting"
-              className="settings-input settings-select"
-              value={thinking}
-              onChange={(event) => setThinking(event.target.value)}
+            id="thinking-setting"
+            className="settings-input settings-select"
+            value={thinking}
+            onChange={(event) => setThinking(event.target.value)}
             >
-              {['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((level) => (
-                <option key={level} value={level}>{level}</option>
-              ))}
+            {['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((level) => (
+            <option key={level} value={level}>{level}</option>
+            ))}
             </select>
             <button className="primary-button full-button" type="button" disabled={saving || !session} onClick={() => void applySessionSettings()}>
-              {saving ? "正在保存…" : "保存会话设置"}
+            {saving ? "正在保存…" : "保存会话设置"}
             </button>
           </section>
+        )}
 
-          <section className="settings-section">
-            <div className="section-heading">
-              <div>
-                <h3>连接</h3>
-                <p>这是 pigo-server 的访问 Token，不是模型 API Key。</p>
-              </div>
-              <span className={`connection-badge ${error ? "connection-badge-error" : ""}`}>
-                {error ? "未连接" : "已连接"}
-              </span>
-            </div>
-            <label className="field-label" htmlFor="token-setting">Bearer Token</label>
-            <input
-              id="token-setting"
-              className="settings-input"
-              type="password"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              placeholder="输入新 Token；留空应用将清除"
-              autoComplete="off"
-            />
-            <button className="secondary-button full-button" type="button" disabled={saving} onClick={() => void applyToken()}>
-              应用连接凭据
-            </button>
-            <p className="credential-note">Token 会保存在当前浏览器的 localStorage 中。不要在公共或不受信任的设备上保存。</p>
-          </section>
+        {active === "models" && (
+          <Models
+            api={api}
+            providers={providers}
+            isAdmin={!!user?.admin}
+            onChanged={() => void reloadModels()}
+          />
+        )}
 
+        {active === "providers" && (
+          <Providers api={api} isAdmin={!!user?.admin} onChanged={() => void refreshProviders()} />
+        )}
+        {active === "workspace" && <WorkspaceFiles />}
+
+        {user?.admin && active === "admin" && <AdminSettings api={api} />}
+        {user?.admin && active === "admin-users" && <AdminUsers api={api} />}
+
+        {active === "runtime" && (
           <section className="settings-section">
             <div className="section-heading">
               <div>
@@ -443,23 +1021,24 @@ function SettingsDrawer({ open, onClose }: { open: boolean; onClose(): void }) {
               </div>
             </div>
             <div className="metric-grid">
-              <div className="metric"><strong>{session?.tools.length ?? 0}</strong><span>工具</span></div>
-              <div className="metric"><strong>{skillCount}</strong><span>技能</span></div>
-              <div className="metric"><strong>{commands.length}</strong><span>命令</span></div>
+            <div className="metric"><strong>{session?.tools?.length ?? 0}</strong><span>工具</span></div>
+            <div className="metric"><strong>{skillCount}</strong><span>技能</span></div>
+            <div className="metric"><strong>{commands.length}</strong><span>命令</span></div>
             </div>
             <div className="capability-list">
-              <div><span>Provider</span><strong>{session?.provider ?? "—"}</strong></div>
-              <div><span>Web 暂不可用命令</span><strong>{unavailableCount}</strong></div>
-              <div><span>Session</span><code>{session ? session.id.slice(0, 12) : "—"}</code></div>
-              <div><span>Sandbox</span><strong>{session?.sandbox ?? "—"}{session?.alive ? " · 运行中" : ""}</strong></div>
+            <div><span>Provider</span><strong>{session?.provider ?? "—"}</strong></div>
+            <div><span>Web 暂不可用命令</span><strong>{unavailableCount}</strong></div>
+            <div><span>Session</span><code>{session ? session.id.slice(0, 12) : "—"}</code></div>
+            <div><span>Sandbox</span><strong>{session?.sandbox ?? "—"}{session?.alive ? " · 运行中" : ""}</strong></div>
             </div>
             <p className="security-note">模型 API Key 留在编排进程，不会进入 bwrap。<code>bash</code> 在沙箱中执行；<code>read</code>/<code>write</code> 只作用于本会话 workspace。用 <code>-tools all</code> 或 <code>-tools read,grep</code> 控制工具。</p>
           </section>
-          <WorkspaceFiles />
+        )}
 
-          {(notice || error) && <div className={error ? "settings-message settings-message-error" : "settings-message"}>{error || notice}</div>}
-        </div>
-      </aside>
+        {(notice || error) && (
+          <div className={error ? "settings-message settings-message-error" : "settings-message"}>{error || notice}</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -693,10 +1272,25 @@ function Thread() {
           components={{ UserMessage, AssistantMessage }}
         />
         <ThreadPrimitive.ViewportFooter className="composer-footer">
+          <RunNotice />
           <Composer />
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+  );
+}
+
+// RunNotice shows transient run status above the composer — today only the
+// retry backoff, where the run pauses for seconds after a rate-limited or
+// overloaded request and a silent UI would look hung.
+function RunNotice() {
+  const { notice } = usePigo();
+  if (!notice) return null;
+  return (
+    <div className="run-notice" role="status">
+      <span className="run-notice-dot" aria-hidden="true" />
+      {notice}
+    </div>
   );
 }
 
@@ -719,7 +1313,7 @@ function AssistantMessage() {
       </div>
       <div className="assistant-body">
         <div className="message assistant-message">
-          <MessagePrimitive.Content />
+          <MessagePrimitive.Content components={{ Text: MarkdownText }} />
           <MessagePrimitive.Error>
             <span className="message-error">{error || "生成失败，请重试。"}</span>
           </MessagePrimitive.Error>

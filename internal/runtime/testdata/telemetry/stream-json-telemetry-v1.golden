@@ -3,6 +3,7 @@
   "contextTokens": 96000,
   "contextUtilization": 0.75,
   "contextWindow": 128000,
+  "retryCount": 3,
   "toolDurationsMs": {
     "bash": {
       "count": 4,

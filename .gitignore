@@ -42,6 +42,9 @@ config.toml
 /pigo
 /pigo-server
 /pigo-server.new
+/pigo-server.log
+/pigo-server.pid
+/start.sh
 
 # goreleaser output
 /dist/
