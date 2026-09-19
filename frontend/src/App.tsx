@@ -1517,6 +1517,11 @@ function Thread() {
   );
 }
 
+// runNoticeAfterMs is how long the running turn stays in one phase (a tool
+// running, or waiting on the model) before the status line says so. Shorter
+// waits are normal and the activity log already shows them.
+const runNoticeAfterMs = 60_000;
+
 // RunNotice shows run status above the composer: a transient notice (a retry
 // backoff, a reconnect) when there is one, otherwise what the running turn is
 // doing once it has been at it for a while — a long command or a slow model
@@ -1533,7 +1538,7 @@ function RunNotice() {
   let text = notice;
   if (!text && runStatus) {
     const elapsed = now - runStatus.since;
-    if (elapsed >= 5000) {
+    if (elapsed >= runNoticeAfterMs) {
       const doing = runStatus.phase === "tool" ? `正在执行 ${runStatus.tool ?? "工具"}` : "等待模型响应";
       text = `${doing}（已 ${formatElapsed(elapsed)}）${runStatus.steps > 0 ? ` · 已完成 ${runStatus.steps} 步` : ""}`;
     }

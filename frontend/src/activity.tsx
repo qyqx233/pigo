@@ -1,9 +1,9 @@
 // A turn's activity, shown inline and in order: the model's narration stays
 // where it was written, as ordinary text, and each run of consecutive tool
 // calls between two stretches of text is one small collapsible group. A group
-// is open while one of its calls runs, following the newest line, and folds to
-// a one-line summary when they are done — so nothing moves once it is on the
-// page.
+// is open while it is where the turn is at, following the newest line, and
+// folds to a one-line summary once the turn moves past it — so nothing moves
+// once it is on the page. A group the reader opens or closes stays that way.
 //
 // The server reports the turn as a list of narration and tool items plus the
 // text after the last call (api.ts foldActivity); turnContent turns that into
@@ -81,21 +81,31 @@ function summarize(parts: ToolPart[]): string {
   return [`${parts.length} 步`, ...byTool, ...(failed ? [`失败 ${failed}`] : [])].join(" · ");
 }
 
-// ToolGroup is one run of consecutive calls.
+// ToolGroup is one run of consecutive calls. running is set while one of
+// them runs.
 function ToolGroup({ indices, running, children }: { indices: readonly number[]; running: boolean; children: ReactNode }) {
   const allParts = useAuiState((state) => state.message.parts);
+  const turnRunning = useAuiState((state) => state.message.status?.type === "running");
   const parts = indices.map((i) => allParts[i]).filter((part): part is ToolPart & (typeof allParts)[number] => part?.type === "tool-call");
   const elapsed = parts.reduce((sum, part) => sum + ((part.result as ToolResult | undefined)?.elapsedMs ?? 0), 0);
-  const [open, setOpen] = useState(running);
+  // current: the turn is still at this group — a call runs, or the model is
+  // working out its next call, which would join this group. Between two calls
+  // running is briefly false, so folding on it would close the group after
+  // every call; the group folds once text or a later group follows it, or the
+  // turn ends.
+  const current = running || (turnRunning && indices[indices.length - 1] === allParts.length - 1);
+  const [open, setOpen] = useState(current);
+  // touched: the reader opened or closed the group; from then on it is theirs.
+  const touched = useRef(false);
   const boxRef = useRef<HTMLDivElement>(null);
   // follow: keep the newest line in view, until the reader scrolls up.
   const follow = useRef(true);
 
-  // Open while a call runs; fold when they are done.
   useEffect(() => {
-    setOpen(running);
-    if (running) follow.current = true;
-  }, [running]);
+    if (touched.current) return;
+    setOpen(current);
+    if (current) follow.current = true;
+  }, [current]);
 
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -104,7 +114,15 @@ function ToolGroup({ indices, running, children }: { indices: readonly number[];
 
   return (
     <div className={running ? "activity activity-running" : "activity"}>
-      <button type="button" className="activity-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <button
+        type="button"
+        className="activity-head"
+        aria-expanded={open}
+        onClick={() => {
+          touched.current = true;
+          setOpen(!open);
+        }}
+      >
         <span className="activity-caret">{open ? "▾" : "▸"}</span>
         <span>{running ? "执行中" : "已执行"}</span>
         <span className="activity-summary">{summarize(parts)}</span>
