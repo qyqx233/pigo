@@ -230,6 +230,9 @@ export type ModelPrice = {
 
 export type PriceList = { currency: string; unit: string; prices: ModelPrice[] };
 
+// SandboxTool is a toolchain mounted read-only into every sandbox.
+export type SandboxTool = { name: string; mount: string; python?: boolean };
+
 export type WorkspaceEntry = { name: string; dir: boolean; size: number };
 
 export type SlashCommandInfo = {
@@ -595,6 +598,11 @@ export class PigoAPI {
   }
 
   // --- billing ----------------------------------------------------------------
+
+  async sandboxTools(): Promise<SandboxTool[]> {
+    const health = await this.request<{ sandbox?: { tools?: SandboxTool[] } }>("/healthz", { headers: this.headers() });
+    return health.sandbox?.tools ?? [];
+  }
 
   async prices(): Promise<PriceList> {
     return this.request<PriceList>("/api/prices", { headers: this.headers() });

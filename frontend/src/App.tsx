@@ -50,6 +50,7 @@ import {
   type ProviderInfo,
   type SessionInfo,
   type SessionSettings,
+  type SandboxTool,
   type SlashCommandInfo,
   type UserInfo,
   type WorkspaceEntry,
@@ -1028,6 +1029,11 @@ function SettingsPage({ tab }: { tab: string }) {
   const [notice, setNotice] = useState("");
   const [customModels, setCustomModels] = useState<CustomModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [sandboxTools, setSandboxTools] = useState<SandboxTool[] | null>(null);
+  useEffect(() => {
+    if (tab !== "runtime") return;
+    void api.sandboxTools().then(setSandboxTools).catch(() => setSandboxTools([]));
+  }, [api, tab]);
 
   useEffect(() => {
     setModel(session?.model ?? "");
@@ -1216,8 +1222,18 @@ function SettingsPage({ tab }: { tab: string }) {
             <div><span>Web 暂不可用命令</span><strong>{unavailableCount}</strong></div>
             <div><span>Session</span><code>{session ? session.id.slice(0, 12) : "—"}</code></div>
             <div><span>Sandbox</span><strong>{session?.sandbox ?? "—"}{session?.alive ? " · 运行中" : ""}</strong></div>
+            <div>
+              <span>沙箱工具链</span>
+              <strong>
+                {sandboxTools === null
+                  ? "…"
+                  : sandboxTools.length === 0
+                    ? "未配置"
+                    : sandboxTools.map((t) => `${t.name} → ${t.mount}`).join("，")}
+              </strong>
             </div>
-            <p className="security-note">模型 API Key 留在编排进程，不会进入 bwrap。<code>bash</code> 在沙箱中执行；<code>read</code>/<code>write</code> 只作用于本会话 workspace。用 <code>-tools all</code> 或 <code>-tools read,grep</code> 控制工具。</p>
+            </div>
+            <p className="security-note">模型 API Key 留在编排进程，不会进入 bwrap。<code>bash</code> 在沙箱中执行；<code>read</code>/<code>write</code> 只作用于本会话 workspace。用 <code>-tools all</code> 或 <code>-tools read,grep</code> 控制工具；用 <code>-sandbox-tool python=目录</code> 把预装常用包的 Python 挂进沙箱（构建见 <code>cmd/pigo-server/sandbox-python/build.sh</code>）。</p>
           </section>
         )}
 

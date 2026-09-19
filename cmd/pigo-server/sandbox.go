@@ -22,6 +22,9 @@ var builtinToolNames = []string{
 type Sandbox struct {
 	Bwrap string
 	Pigo  string
+	// Tools are the toolchains mounted read-only at /opt/<name>
+	// (sandbox_tools.go).
+	Tools []sandboxTool
 }
 
 // Ready reports whether bwrap and pigo binaries exist. Missing either is
@@ -86,12 +89,13 @@ func (s Sandbox) mountArgs(spec RunSpec) ([]string, error) {
 		"/etc/ssl", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/hosts", "/etc/passwd",
 	})
 	args = appendDevBinds(args, []string{"/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"})
+	args = append(args, toolMountArgs(s.Tools)...)
 	args = append(args,
 		"--bind", spec.Workspace, "/workspace",
 		"--bind", spec.Home, "/home/pigo",
 		"--setenv", "HOME", "/home/pigo",
 		"--setenv", "PIGO_HOME", "/home/pigo/.pigo",
-		"--setenv", "PATH", "/tmp:/usr/local/bin:/usr/bin:/bin",
+		"--setenv", "PATH", toolPath(s.Tools, "/tmp:/usr/local/bin:/usr/bin:/bin"),
 		"--setenv", "USER", "pigo",
 		"--setenv", "TERM", "dumb",
 		"--chdir", "/workspace",

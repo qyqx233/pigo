@@ -1,0 +1,27 @@
+# 沙箱专用 Python 环境预装的包（build.sh 读取）。
+#
+# 挂进沙箱后是只读的：模型在会话里装不了包，需要的包都在这里列出。
+# 不锁版本；每次构建装的实际版本记录在产物的 PIGO-PACKAGES.txt 里，
+# 需要复现某次构建时，把那份清单当作 -r 的输入即可。
+
+# 表格：Excel / CSV
+pandas
+openpyxl        # .xlsx 读写
+xlrd            # 旧版 .xls 读取
+xlsxwriter      # 带格式的 .xlsx 输出
+
+# PDF
+pdfplumber      # 文字与表格提取（带坐标）
+pypdf           # 拆分、合并、读取文字
+pymupdf         # 渲染、快速提取；import pymupdf
+
+# Office 文档
+python-docx     # .docx
+python-pptx     # .pptx
+
+# 网页与文本
+lxml
+beautifulsoup4
+requests
+chardet         # 编码探测（GBK 等老文件）
+tabulate        # 把表格打印成文本

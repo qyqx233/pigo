@@ -49,6 +49,9 @@ type serverConfig struct {
 	turnIdle     time.Duration
 	turnMax      time.Duration
 	turnMaxSteps int
+	// sandboxTools are the -sandbox-tool / PIGO_SANDBOX_TOOLS entries
+	// (name=dir), mounted read-only at /opt/<name> in every sandbox.
+	sandboxTools []string
 	// turnTick is how often the brakes are checked; zero means the default.
 	// Not a flag: tests shorten it.
 	turnTick        time.Duration
@@ -163,6 +166,8 @@ func main() {
 	flag.StringVar(&cfg.thinking, "thinking", "medium", "reasoning effort")
 	flag.StringVar(&cfg.tools, "tools", "", "comma-separated tool allowlist; empty disables tools, 'all' enables all tools")
 	flag.BoolVar(&cfg.skills, "skills", false, "bind the host skills directory into the sandbox (off by default)")
+	var tools toolFlag
+	flag.Var(&tools, "sandbox-tool", "mount a self-contained toolchain read-only at /opt/<name> in every sandbox, its bin/ first on PATH: name=dir (repeatable; also PIGO_SANDBOX_TOOLS, comma-separated). Build a Python one with cmd/pigo-server/sandbox-python/build.sh")
 	flag.IntVar(&cfg.maxSessions, "max-sessions", 32, "maximum live browser sessions")
 	flag.DurationVar(&cfg.turnIdle, "turn-idle", 10*time.Minute, "stop a turn that makes no progress (no model output, no tool starting or finishing) for this long; 0 disables")
 	flag.DurationVar(&cfg.turnMax, "turn-max", 2*time.Hour, "stop a turn that runs longer than this in total; 0 disables")
@@ -172,6 +177,7 @@ func main() {
 	flag.DurationVar(&cfg.idleTimeout, "idle", 30*time.Minute, "stop an idle sandbox process after this duration; 0 disables idle expiry. Disk state is kept. There is no maximum lifetime.")
 	flag.DurationVar(&cfg.emptySessionTTL, "empty-session-ttl", time.Hour, "delete sessions with no transcript and an empty workspace after this duration; 0 disables cleanup")
 	flag.Parse()
+	cfg.sandboxTools = toolSpecs(os.Getenv("PIGO_SANDBOX_TOOLS"), tools)
 
 	if cfg.maxSessions < 1 {
 		log.Fatal("-max-sessions must be at least 1")
@@ -327,8 +333,15 @@ func newAPIServer(cfg serverConfig) (*apiServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure agent: %w", err)
 	}
+	tools, err := resolveSandboxTools(cfg.sandboxTools)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range tools {
+		log.Printf("pigo-server: sandbox tool %s: %s mounted read-only at %s", t.Name, t.HostDir, t.Mount)
+	}
 	bwrap, bwrapErr := findBwrap()
-	sandbox := Sandbox{Bwrap: bwrap}
+	sandbox := Sandbox{Bwrap: bwrap, Tools: tools}
 	if bwrapErr != nil {
 		log.Printf("pigo-server: sandbox unavailable: %v (bash tools will fail closed)", bwrapErr)
 	}
@@ -402,6 +415,9 @@ func (s *apiServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			"error": sandboxErr,
 			"bwrap": s.sandbox.Bwrap,
 			"pigo":  s.sandbox.Pigo,
+			// Names and mount points only: this endpoint is unauthenticated,
+			// and host paths are none of a visitor's business.
+			"tools": sandboxToolsResponse(s.sandbox.Tools),
 		},
 	})
 }

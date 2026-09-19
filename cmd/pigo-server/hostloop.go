@@ -41,6 +41,9 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 		return err
 	}
 	prompt = virtualizeWorkspacePrompt(prompt, ws)
+	if hasHostBash(tools) {
+		prompt += toolPromptNote(s.sandbox.Tools)
+	}
 	prov, providerName, err := s.resolveProvider(managed.meta.Model, managed.meta.Provider)
 	if err != nil {
 		return err
@@ -91,6 +94,15 @@ func (s *apiServer) hostTools(managed *managedSession) []agentcore.AgentTool {
 		tools = run.ApplyToolPolicy(tools, policy)
 	}
 	return tools
+}
+
+func hasHostBash(tools []agentcore.AgentTool) bool {
+	for _, t := range tools {
+		if t.Name() == "bash" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasHostRead(tools []agentcore.AgentTool) bool {
