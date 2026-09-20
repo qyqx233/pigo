@@ -390,6 +390,9 @@ export type ModelParam = {
   model: string;
   contextWindow?: number;
   compactPct?: number;
+  // knowledgeCutoff: when the model's training data ends (YYYY-MM). Stated in
+  // the system prompt; empty means the prompt says only that it is old.
+  knowledgeCutoff?: string;
   updatedBy?: string;
   updatedAt?: string;
 };

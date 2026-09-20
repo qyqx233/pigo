@@ -42,15 +42,20 @@ const (
 	maxKeepRecentTokens = 20000
 )
 
-// modelParam overrides the window and/or the threshold for one model. A zero
-// field keeps the default.
+// modelParam overrides the window, the threshold and/or the knowledge cutoff
+// for one model. A zero field keeps the default.
 type modelParam struct {
-	Provider      string    `json:"provider"`
-	Model         string    `json:"model"`
-	ContextWindow int       `json:"contextWindow,omitempty"`
-	CompactPct    int       `json:"compactPct,omitempty"`
-	UpdatedBy     string    `json:"updatedBy,omitempty"`
-	UpdatedAt     time.Time `json:"updatedAt,omitempty"`
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
+	CompactPct    int    `json:"compactPct,omitempty"`
+	// KnowledgeCutoff is when the model's training data ends, as YYYY-MM. It
+	// is stated in the system prompt so the model treats an unfamiliar name as
+	// its own staleness rather than as proof the thing does not exist. See
+	// spec/prompt-tuning.md.
+	KnowledgeCutoff string    `json:"knowledgeCutoff,omitempty"`
+	UpdatedBy       string    `json:"updatedBy,omitempty"`
+	UpdatedAt       time.Time `json:"updatedAt,omitempty"`
 }
 
 func validWindow(n int) bool { return n >= minContextWindow && n <= maxContextWindow }
@@ -68,8 +73,13 @@ func (p modelParam) validate() (modelParam, error) {
 	if p.Provider == "" || p.Model == "" {
 		return p, errors.New("provider 和模型都不能为空")
 	}
-	if p.ContextWindow == 0 && p.CompactPct == 0 {
-		return p, errors.New("上下文窗口和压缩阈值至少设一项")
+	cutoff, err := normalizeCutoff(p.KnowledgeCutoff, time.Now())
+	if err != nil {
+		return p, err
+	}
+	p.KnowledgeCutoff = cutoff
+	if p.ContextWindow == 0 && p.CompactPct == 0 && p.KnowledgeCutoff == "" {
+		return p, errors.New("上下文窗口、压缩阈值和训练截止至少设一项")
 	}
 	if p.ContextWindow != 0 && !validWindow(p.ContextWindow) {
 		return p, errWindowRange
@@ -78,6 +88,30 @@ func (p modelParam) validate() (modelParam, error) {
 		return p, errPctRange
 	}
 	return p, nil
+}
+
+// normalizeCutoff accepts YYYY-MM or YYYY-MM-DD and returns YYYY-MM. A cutoff
+// in the future is a typo: it would tell the model its knowledge reaches past
+// today, which is the opposite of what the note is for.
+func normalizeCutoff(value string, now time.Time) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	var when time.Time
+	var err error
+	for _, layout := range []string{"2006-01", "2006-01-02"} {
+		if when, err = time.Parse(layout, value); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return "", errors.New("训练截止须写成 2026-05 或 2026-05-31")
+	}
+	if when.After(now) {
+		return "", errors.New("训练截止不能晚于今天")
+	}
+	return when.Format("2006-01"), nil
 }
 
 // contextDefaults returns the deployment defaults, falling back to the
@@ -218,6 +252,20 @@ func (s *apiServer) contextParams(providerName, model string) contextParams {
 		}
 	}
 	return out
+}
+
+// knowledgeCutoff is a model's configured training cutoff, empty when the
+// administrator has not set one. There is deliberately no built-in table of
+// model cutoffs: such a table goes stale exactly the way the note is meant to
+// guard against, and a proxied model would not be in it anyway.
+func (s *apiServer) knowledgeCutoff(providerName, model string) string {
+	key := priceKey(providerName, model)
+	for _, row := range s.settings.modelParams() {
+		if priceKey(row.Provider, row.Model) == key {
+			return row.KnowledgeCutoff
+		}
+	}
+	return ""
 }
 
 // openRouterWindowTTL is how long OpenRouter's catalog windows are trusted.

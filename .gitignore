@@ -45,6 +45,11 @@ config.toml
 /pigo-server.log
 /pigo-server.pid
 /start.sh
+# The second server built for testing on another port, and its log and data.
+/pigo-parts
+/pigo-parts.log
+/pdata/
+/scene-tools.yaml
 # The frontend build embedded into pigo-server; built by `pnpm --dir frontend build`.
 # Only the placeholder is tracked, so //go:embed compiles in a fresh checkout.
 /cmd/pigo-server/web/dist/*

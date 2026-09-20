@@ -33,31 +33,22 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 	if managed.agentCtx != nil && managed.runCfg.Stream != nil {
 		return nil
 	}
-	ws := managed.paths.Workspace
 	tools, err := s.hostTools(managed)
 	if err != nil {
 		return err
 	}
-	prompt, err := runtime.BuildSystemPrompt(runtime.PromptConfig{
-		WorkingDir:        ws,
-		Root:              ws,
-		ReadToolAvailable: hasHostRead(tools),
-	})
-	if err != nil {
-		return err
-	}
-	prompt = virtualizeWorkspacePrompt(prompt, ws)
-	if hasHostBash(tools) {
-		prompt += toolPromptNote(s.sandbox.Tools)
-	}
-	if sc := managed.meta.Scene; sc != nil {
-		prompt += sceneSystemPrompt(sc)
-	}
+	// The provider is resolved first: the prompt states the model's knowledge
+	// cutoff, which is configured per provider + model.
 	prov, providerName, err := s.resolveProvider(managed.meta.Model, managed.meta.Provider)
 	if err != nil {
 		return err
 	}
 	managed.meta.Provider = providerName
+	cutoff := s.knowledgeCutoff(providerName, managed.meta.Model)
+	prompt, err := s.sessionPrompt(managed, tools, cutoff)
+	if err != nil {
+		return err
+	}
 	thinking := agentcore.ThinkingLevel(managed.meta.Thinking)
 	if thinking == "" {
 		thinking = agentcore.ThinkingMedium
@@ -74,7 +65,38 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 		Messages:     msgs,
 		Tools:        tools,
 	}
+	managed.promptKey, managed.promptCutoff = priceKey(providerName, managed.meta.Model), cutoff
 	return nil
+}
+
+// sessionPrompt assembles a session's system prompt: the base instruction and
+// environment block, the knowledge-cutoff note, the workspace virtualization,
+// the sandbox toolchains and the scene. It reads the workspace's AGENTS.md, so
+// a session builds it once; a later change of model swaps the cutoff note in
+// place instead of calling this again.
+func (s *apiServer) sessionPrompt(managed *managedSession, tools []agentcore.AgentTool, cutoff string) (string, error) {
+	ws := managed.paths.Workspace
+	// One timestamp for both the environment block and the anchor the cutoff
+	// note is inserted after.
+	now := time.Now()
+	prompt, err := runtime.BuildSystemPrompt(runtime.PromptConfig{
+		WorkingDir:        ws,
+		Root:              ws,
+		ReadToolAvailable: hasHostRead(tools),
+		Now:               func() time.Time { return now },
+	})
+	if err != nil {
+		return "", err
+	}
+	prompt, _ = withKnowledgeCutoff(prompt, now, cutoff)
+	prompt = virtualizeWorkspacePrompt(prompt, ws)
+	if hasHostBash(tools) {
+		prompt += toolPromptNote(s.sandbox.Tools)
+	}
+	if sc := managed.meta.Scene; sc != nil {
+		prompt += sceneSystemPrompt(sc)
+	}
+	return prompt, nil
 }
 
 // hostTools is a session's tool set: the built-ins, then the configured
@@ -365,6 +387,22 @@ func (s *apiServer) applyHostConfig(managed *managedSession) error {
 	managed.runCfg.ThinkingLevel = thinking
 	s.meterStreams(managed, prov, providerName)
 	managed.runCfg.GetAPIKey = s.apiKeyFunc(managed.meta.UserID)
+	// The prompt states the model's knowledge cutoff, so switching model
+	// updates it. Doing so costs the prefix cache, which switching model has
+	// already given up anyway; nothing else in the prompt moves.
+	if key := priceKey(providerName, managed.meta.Model); key != managed.promptKey {
+		if next := s.knowledgeCutoff(providerName, managed.meta.Model); next != managed.promptCutoff {
+			prompt, ok := swapCutoffNote(managed.agentCtx.SystemPrompt, managed.promptCutoff, next)
+			if !ok {
+				if prompt, err = s.sessionPrompt(managed, managed.agentCtx.Tools, next); err != nil {
+					return err
+				}
+			}
+			managed.agentCtx.SystemPrompt = prompt
+			managed.promptCutoff = next
+		}
+		managed.promptKey = key
+	}
 	return nil
 }
 

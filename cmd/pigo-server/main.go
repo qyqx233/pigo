@@ -100,6 +100,11 @@ type managedSession struct {
 	transcript transcriptState
 	agentCtx   *agentcore.AgentContext
 	runCfg     runtime.RunConfig
+	// promptKey is the provider + model the system prompt was built for, and
+	// promptCutoff the knowledge cutoff it states: a switch of model swaps
+	// that line for the new model's.
+	promptKey    string
+	promptCutoff string
 	// gate bounds the sub-agents this session runs at once (subagent.go).
 	gate *subagentGate
 }

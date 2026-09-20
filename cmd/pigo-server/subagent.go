@@ -409,8 +409,12 @@ func (s *apiServer) runSubagent(ctx context.Context, managed *managedSession, ca
 	cfg.ContextWindow = params.Window
 	cfg.Compaction = params.settings()
 
+	// The child's own environment: it may run on a different model from the
+	// parent's, so the date and the cutoff are its model's, not the session's.
+	childPrompt := taskSystemPrompt + subagentEnvironment(time.Now(), s.knowledgeCutoff(providerName, model))
+
 	agentCtx := &agentcore.AgentContext{
-		SystemPrompt: taskSystemPrompt,
+		SystemPrompt: childPrompt,
 		Messages: agentcore.MessageList{agentcore.UserMessage{
 			RoleField: agentcore.RoleUser,
 			Content:   agentcore.ContentList{agentcore.NewTextContent(a.Prompt)},
