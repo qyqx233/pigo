@@ -45,6 +45,11 @@ type sessionMeta struct {
 	ActiveTurn *turnRecord `json:"activeTurn,omitempty"`
 	// LastTurn is how the most recent turn ended.
 	LastTurn *turnRecord `json:"lastTurn,omitempty"`
+
+	// draft: created but nothing sent yet. A draft lives only in memory — no
+	// directory, no database row — until its first message (materialize), so
+	// opening 新会话 and leaving leaves nothing behind.
+	draft bool
 }
 
 func (p sessionPaths) create() error {

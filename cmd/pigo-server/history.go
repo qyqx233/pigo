@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -59,7 +60,8 @@ func (s *apiServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	result := make([]map[string]any, 0, len(all))
 	for _, managed := range all {
 		managed.mu.Lock()
-		if !managed.closed && principalCanAccess(principal, managed.meta) {
+		// A draft is not listed: nothing has been said in it yet.
+		if !managed.closed && !managed.meta.draft && principalCanAccess(principal, managed.meta) {
 			if managed.meta.Title == "" {
 				managed.meta.Title = s.deriveSessionTitle(managed)
 				if managed.meta.Title != "" {
@@ -247,6 +249,12 @@ func historyArguments(raw json.RawMessage) any {
 
 func workspaceIsEmpty(paths sessionPaths) bool {
 	entries, err := os.ReadDir(paths.Workspace)
+	// A draft has no directory at all until its first message. Reading that as
+	// "not empty" would keep every abandoned draft in memory for the life of
+	// the process, since the reaper skips a session whose workspace has files.
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
 	return err == nil && len(entries) == 0
 }
 

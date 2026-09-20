@@ -516,11 +516,9 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	now := time.Now().UTC()
+	// The session starts as a draft: nothing is written until its first
+	// message (materialize).
 	paths := newSessionPaths(s.config.dataDir, id)
-	if err := paths.create(); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	// The administrator's defaults win over the start-up flags: the flags are
 	// only the seed the settings store falls back to, so reading config here
 	// would make the 部署 panel's "默认模型" silently do nothing.
@@ -554,18 +552,14 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 			Scene:     sceneSnapshotOf(sc),
 			CreatedAt: now,
 			LastUsed:  now,
+			draft:     true,
 		},
-	}
-	if err := s.saveSession(managed.meta); err != nil {
-		_ = s.removeSession(id, paths)
-		writeError(w, http.StatusInternalServerError, "write session metadata")
-		return
 	}
 
 	s.mu.Lock()
-	if len(s.sessions) >= s.config.maxSessions {
+	s.dropOldDrafts(userID)
+	if s.storedSessionsLocked() >= s.config.maxSessions {
 		s.mu.Unlock()
-		_ = s.removeSession(id, paths)
 		writeError(w, http.StatusServiceUnavailable, "session limit reached")
 		return
 	}
@@ -707,6 +701,12 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	managed.meta.LastUsed = time.Now().UTC()
+	// The first message makes a draft a real session.
+	if err := s.materializeLocked(managed); err != nil {
+		managed.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if m, expired := s.expiredCustomModel(r, managed.meta.Model); expired {
 		managed.mu.Unlock()
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("custom model %q expired on %s; switch model before sending", m.ID, m.ExpiresAt))
@@ -846,6 +846,11 @@ func (s *apiServer) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := r.URL.Query().Get("path")
+	if managed.meta.draft && strings.Trim(rel, "/.") == "" {
+		// A draft has no workspace yet: it is empty.
+		writeJSON(w, http.StatusOK, map[string]any{"path": rel, "entries": []any{}})
+		return
+	}
 	entries, err := listWorkspace(managed.paths.Workspace, rel)
 	if err != nil {
 		if errors.Is(err, errPathEscape) {
@@ -991,6 +996,9 @@ func sessionResponse(managed *managedSession) map[string]any {
 		"pigoSessionId": m.PigoSessionID,
 		"sandbox":       "bwrap",
 		"alive":         managed.liveAlive(),
+	}
+	if m.draft {
+		out["draft"] = true
 	}
 	if m.Scene != nil {
 		out["scene"] = map[string]any{"slug": m.Scene.Slug, "name": m.Scene.Name, "icon": m.Scene.Icon}

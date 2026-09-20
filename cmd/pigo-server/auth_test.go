@@ -132,6 +132,7 @@ func TestSessionOwnershipAndHistory(t *testing.T) {
 	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
+	materialize(t, server, created.ID)
 	managed, _ := server.getSession(created.ID)
 	managed.mu.Lock()
 	managed.agentCtx = &agentcore.AgentContext{Messages: agentcore.MessageList{

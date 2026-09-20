@@ -398,7 +398,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
         selected = await api.createSession();
         available = [selected, ...available];
       }
-      setSessions(available.some((item) => item.id === selected.id) ? available : [selected, ...available]);
+      setSessions(available.some((item) => item.id === selected.id) || selected.draft ? available : [selected, ...available]);
       await openSession(selected, currentUser);
       void loadModels();
       loadScenes();
@@ -528,9 +528,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     if (remaining.length > 0) {
       await openSession(await api.getSession(remaining[0].id), user);
     } else {
-      const created = await api.createSession();
-      setSessions([created]);
-      await openSession(created, user);
+      await openSession(await api.createSession(), user);
     }
   }
 
@@ -1513,7 +1511,15 @@ function CommandBrowser({ open, onClose }: { open: boolean; onClose(): void }) {
 }
 
 function Thread() {
-  const { setCommandBrowserOpen } = usePigo();
+  const { setCommandBrowserOpen, session, draft, clearDraft } = usePigo();
+  const aui = useAui();
+  // A draft (a scene's example question) goes into the composer once the
+  // new conversation is showing.
+  useEffect(() => {
+    if (!draft) return;
+    aui.composer.setText(draft);
+    clearDraft();
+  }, [draft, aui, clearDraft]);
   return (
     <ThreadPrimitive.Root className="thread-root">
       <ThreadPrimitive.Viewport className="thread-viewport">

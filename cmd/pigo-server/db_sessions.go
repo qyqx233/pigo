@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 )
 
 // --- sessions -------------------------------------------------------------------------
@@ -46,6 +47,9 @@ func loadSessions(db *sqlDB, dataDir string) (map[string]*managedSession, error)
 }
 
 func upsertSession(e sqlExec, meta sessionMeta) error {
+	if meta.draft {
+		return nil // stored when its first message arrives (materialize)
+	}
 	doc, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -73,4 +77,60 @@ func (s *apiServer) removeSession(id string, paths sessionPaths) error {
 		return fmt.Errorf("delete session record: %w", err)
 	}
 	return os.RemoveAll(paths.Root)
+}
+
+// maxDraftsPerUser bounds the drafts a user can hold in memory: each 新会话
+// click makes one, and a draft only ends by being used or dropped here.
+const maxDraftsPerUser = 3
+
+// dropOldDrafts forgets a user's oldest drafts, keeping room for one more.
+// Caller holds s.mu.
+func (s *apiServer) dropOldDrafts(userID string) {
+	var drafts []*managedSession
+	for _, managed := range s.sessions {
+		managed.mu.Lock()
+		if managed.meta.draft && managed.meta.UserID == userID && managed.activeTurn() == nil {
+			drafts = append(drafts, managed)
+		}
+		managed.mu.Unlock()
+	}
+	if len(drafts) < maxDraftsPerUser {
+		return
+	}
+	sort.Slice(drafts, func(i, j int) bool { return drafts[i].meta.CreatedAt.Before(drafts[j].meta.CreatedAt) })
+	for _, managed := range drafts[:len(drafts)-maxDraftsPerUser+1] {
+		delete(s.sessions, managed.meta.ID)
+	}
+}
+
+// storedSessionsLocked counts the sessions that are not drafts, which is what
+// the session limit is about. Caller holds s.mu.
+func (s *apiServer) storedSessionsLocked() int {
+	n := 0
+	for _, managed := range s.sessions {
+		managed.mu.Lock()
+		if !managed.meta.draft {
+			n++
+		}
+		managed.mu.Unlock()
+	}
+	return n
+}
+
+// materializeLocked writes a draft session out — its directory and its row —
+// when its first message arrives. Caller holds managed.mu.
+func (s *apiServer) materializeLocked(managed *managedSession) error {
+	if !managed.meta.draft {
+		return nil
+	}
+	if err := managed.paths.create(); err != nil {
+		return err
+	}
+	managed.meta.draft = false
+	if err := s.saveSession(managed.meta); err != nil {
+		managed.meta.draft = true
+		_ = os.RemoveAll(managed.paths.Root)
+		return fmt.Errorf("save session: %w", err)
+	}
+	return nil
 }

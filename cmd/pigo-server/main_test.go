@@ -62,6 +62,7 @@ func TestCreateSessionKeepsPreviousHistory(t *testing.T) {
 	if err := json.Unmarshal(firstResponse.Body.Bytes(), &first); err != nil {
 		t.Fatal(err)
 	}
+	materialize(t, server, first.ID)
 	newRequest := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader("{}"))
 	newResponse := httptest.NewRecorder()
 	server.handleCreateSession(newResponse, newRequest)
@@ -464,5 +465,18 @@ func createSession(t *testing.T, server *apiServer) string {
 	if payload.ID == "" {
 		t.Fatal("missing session id")
 	}
+	// A new session is a draft until its first message; most tests want a
+	// stored one, as if a message had been sent.
+	materialize(t, server, payload.ID)
 	return payload.ID
+}
+
+func materialize(t *testing.T, server *apiServer, id string) {
+	t.Helper()
+	managed := server.sessions[id]
+	managed.mu.Lock()
+	defer managed.mu.Unlock()
+	if err := server.materializeLocked(managed); err != nil {
+		t.Fatal(err)
+	}
 }
