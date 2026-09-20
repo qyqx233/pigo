@@ -106,6 +106,12 @@ func (s *apiServer) hostTools(managed *managedSession) ([]agentcore.AgentTool, e
 	if err != nil {
 		return nil, err
 	}
+	// The task tool, when the deployment allows it. A scene session does not
+	// get one: a scene is a controlled setup, and a sub-agent does not inherit
+	// its prompt. Sub-agents build their own set and drop this (subagent.go).
+	if !s.settings.subagent().Disabled && managed.meta.Scene == nil {
+		tools = append(tools, &taskTool{server: s, session: managed})
+	}
 	if !toolsAreAll(s.config.tools) && len(s.toolNames) > 0 {
 		policy := run.NewToolPolicy(s.toolNames, nil)
 		tools = run.ApplyToolPolicy(tools, policy)

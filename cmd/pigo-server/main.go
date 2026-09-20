@@ -100,6 +100,17 @@ type managedSession struct {
 	transcript transcriptState
 	agentCtx   *agentcore.AgentContext
 	runCfg     runtime.RunConfig
+	// gate bounds the sub-agents this session runs at once (subagent.go).
+	gate *subagentGate
+}
+
+// subagentGate is the session's sub-agent gate, made on first use. Caller
+// holds managed.mu.
+func (m *managedSession) subagentGate() *subagentGate {
+	if m.gate == nil {
+		m.gate = newSubagentGate()
+	}
+	return m.gate
 }
 
 type messageRequest struct {
@@ -153,6 +164,9 @@ type streamEvent struct {
 	// Detail explains a turn that finished but not simply (the step limit),
 	// or, on a tool's start, what the call is doing (activity.go).
 	Detail string `json:"detail,omitempty"`
+	// ParentID, on a sub-agent's event, is the task call it belongs to: the
+	// event is folded under that call rather than into the turn's own log.
+	ParentID string `json:"parentId,omitempty"`
 	// Activity is the "snapshot" event's log of the turn so far.
 	Activity []activityItem `json:"activity,omitempty"`
 	// Compaction is a "compaction" event's figures (context_compact.go).
@@ -265,6 +279,8 @@ func main() {
 	mux.Handle("PUT /api/admin/providers", admin(api.handlePutCustomProvider))
 	mux.Handle("DELETE /api/admin/providers/{name}", admin(api.handleDeleteCustomProvider))
 	mux.Handle("PATCH /api/admin/providers/{name}", admin(api.handlePatchCustomProvider))
+	mux.Handle("GET /api/admin/subagent", admin(api.handleSubagent))
+	mux.Handle("PUT /api/admin/subagent", admin(api.handlePutSubagent))
 	mux.Handle("GET /api/admin/sandbox-env", admin(api.handleSandboxEnv))
 	mux.Handle("PUT /api/admin/sandbox-env", admin(api.handlePutSandboxEnv))
 	mux.Handle("DELETE /api/admin/sandbox-env/{name}", admin(api.handleDeleteSandboxEnv))

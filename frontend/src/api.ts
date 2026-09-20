@@ -143,6 +143,10 @@ export type CompactionReport = {
 // between tool calls, a tool call with its status, or a context compaction.
 export type ActivityItem = {
   kind: "text" | "tool" | "compaction";
+  // children: a sub-agent's own steps, under the task call that spawned it.
+  // Live only — the transcript keeps the task call and its report, not the
+  // sub-agent's internal steps.
+  children?: ActivityItem[];
   // compaction: its figures; summary is the text that replaced the earlier
   // conversation (history only).
   compaction?: CompactionReport;
@@ -174,9 +178,29 @@ export function foldActivity(
     isError?: boolean;
     elapsedMs?: number;
     compaction?: CompactionReport;
+    parentId?: string;
   },
 ): { items: ActivityItem[]; text: string } {
   const next = [...items];
+  // A sub-agent's event belongs under its task call, not in the turn's own
+  // log: fold it into that call's children, leaving the narration alone.
+  if (event.parentId) {
+    const at = next.map((item) => item.kind === "tool" && item.id === event.parentId).lastIndexOf(true);
+    if (at < 0) return { items, text };
+    const parent = next[at];
+    if (event.type === "subagent") {
+      // What the sub-agent said between its own calls.
+      if (event.phase !== "text" || !event.text?.trim()) return { items, text };
+      next[at] = { ...parent, children: [...(parent.children ?? []), { kind: "text", text: event.text.trim() }] };
+      return { items: next, text };
+    }
+    const folded = foldActivity(parent.children ?? [], "", { ...event, parentId: undefined });
+    next[at] = { ...parent, children: folded.items };
+    return { items: next, text };
+  }
+  if (event.type === "subagent") {
+    return { items, text }; // a sub-agent event with no task call to nest under
+  }
   const find = () => {
     for (let i = next.length - 1; i >= 0; i--) {
       if (next[i].kind === "tool" && next[i].id === event.id) return i;
@@ -229,7 +253,7 @@ export function foldActivity(
 // CallUsage is one model call: the "usage" stream event, and one detail row of a
 // turn. Token counts never overlap: input excludes the cache. Cost is in yuan.
 export type CallUsage = {
-  kind: "chat" | "compaction";
+  kind: "chat" | "compaction" | "subagent";
   status: "ok" | "error" | "aborted" | "unreported";
   provider: string;
   model: string;
@@ -415,6 +439,36 @@ export type ServerSettings = {
   allowUserKeys: boolean;
 };
 
+// SandboxEnvVar is one variable injected into every session container. Not a
+// secret: a user can read it with `env` in their own sandbox.
+export type SandboxEnvVar = { name: string; value: string; updatedBy?: string; updatedAt?: string };
+
+export type SandboxEnvList = {
+  vars: SandboxEnvVar[];
+  // runningOld: containers already running, which keep the environment they
+  // started with.
+  runningOld: number;
+  // processHint: the server's own proxy settings, offered as a starting point.
+  processHint?: string[];
+};
+
+// SubagentSettings is what the deployment allows the task tool to do. A zero
+// field means the server's default, which `defaults` carries for placeholders.
+export type SubagentSettings = {
+  disabled?: boolean;
+  maxConcurrent?: number;
+  maxSteps?: number;
+  timeoutSeconds?: number;
+  models?: string[];
+  updatedBy?: string;
+  updatedAt?: string;
+};
+
+export type SubagentView = {
+  settings: SubagentSettings;
+  defaults: { maxConcurrent: number; maxSteps: number; timeoutSeconds: number };
+};
+
 export type AdminUser = {
   id: string;
   username: string;
@@ -446,7 +500,9 @@ type StreamEvent = {
   // "heartbeat" says what the turn is doing while nothing else happens.
   // "done" / "error" end the turn, with the reason.
   // "compaction" reports a context compaction starting and ending.
-  type: "snapshot" | "delta" | "done" | "error" | "tool" | "notice" | "usage" | "heartbeat" | "compaction";
+  type: "snapshot" | "delta" | "done" | "error" | "tool" | "notice" | "usage" | "heartbeat" | "compaction" | "subagent";
+  // parentId, on a sub-agent's event, is the task call it belongs to.
+  parentId?: string;
   compaction?: CompactionReport;
   usage?: CallUsage;
   usages?: CallUsage[];
@@ -684,6 +740,18 @@ export class PigoAPI {
   }
 
   async subagent(): Promise<SubagentView> {
+    return this.request<SubagentView>("/api/admin/subagent", { headers: this.headers() });
+  }
+
+  async putSubagent(settings: SubagentSettings): Promise<SubagentView> {
+    return this.request<SubagentView>("/api/admin/subagent", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(settings),
+    });
+  }
+
+  async sandboxEnv(): Promise<SandboxEnvList> {
     return this.request<SandboxEnvList>("/api/admin/sandbox-env", { headers: this.headers() });
   }
 
@@ -1029,6 +1097,7 @@ export class PigoAPI {
             handlers.onActivity?.(activity);
             yield text;
             break;
+          case "subagent":
           case "tool": {
             ({ items: activity, text } = foldActivity(activity, text, event));
             handlers.onActivity?.(activity);

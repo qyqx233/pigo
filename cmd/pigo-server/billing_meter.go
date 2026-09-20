@@ -147,9 +147,16 @@ type meter struct {
 	now      func() time.Time
 }
 
-// wrap decorates a provider stream. kind labels the calls ("chat" or
-// "compaction").
+// wrap decorates a provider stream. kind labels the calls ("chat",
+// "compaction" or "subagent").
 func (m *meter) wrap(inner provider.StreamFn, providerName, kind string) provider.StreamFn {
+	return m.wrapAs(inner, call{provider: providerName, kind: kind})
+}
+
+// wrapAs is wrap with the rest of the call's labels given: a sub-agent runs on
+// its own provider, whose key may come from a different tier than the turn's
+// (subagent.go), and that decides who the call is billed to.
+func (m *meter) wrapAs(inner provider.StreamFn, c call) provider.StreamFn {
 	if m == nil || inner == nil {
 		return inner
 	}
@@ -161,7 +168,9 @@ func (m *meter) wrap(inner provider.StreamFn, providerName, kind string) provide
 		}
 		out := provider.NewAssistantMessageEventStream(0)
 		turn.pending.Add(1)
-		go m.relay(ctx, in, out, turn, call{provider: providerName, model: model, kind: kind})
+		next := c
+		next.model = model
+		go m.relay(ctx, in, out, turn, next)
 		return out, nil
 	}
 }
@@ -171,6 +180,9 @@ type call struct {
 	provider string
 	model    string
 	kind     string
+	// keySource overrides the turn's when the call is not on the turn's own
+	// provider; empty means the turn's.
+	keySource string
 }
 
 // relay forwards the inner stream unchanged and records the call once it ends.
@@ -252,6 +264,10 @@ func (m *meter) record(turn *turnInfo, c call, msg agentcore.AssistantMessage, s
 		return
 	}
 
+	keySource := c.keySource
+	if keySource == "" {
+		keySource = turn.keySource
+	}
 	entry := ledgerEntry{
 		ID:              newLedgerID(),
 		At:              m.clock(),
@@ -265,8 +281,8 @@ func (m *meter) record(turn *turnInfo, c call, msg agentcore.AssistantMessage, s
 		ResponseModel:   msg.ResponseModel,
 		Kind:            c.kind,
 		Status:          status,
-		KeySource:       turn.keySource,
-		BilledTo:        billedToFor(turn.keySource),
+		KeySource:       keySource,
+		BilledTo:        billedToFor(keySource),
 		Input:           usage.InputTokens,
 		CacheRead:       usage.CacheReadTokens,
 		CacheWrite:      usage.CacheWriteTokens,

@@ -34,6 +34,10 @@ type activityItem struct {
 	// Compaction is a "compaction" item's figures; Status is then "running",
 	// "ok" or "error", and Text the error.
 	Compaction *compactionReport `json:"compaction,omitempty"`
+	// Children are a sub-agent's own steps, under the task call that spawned
+	// it (subagent.go). They are live only: the transcript keeps the task call
+	// and its report, not the sub-agent's internal steps.
+	Children []activityItem `json:"children,omitempty"`
 }
 
 const (

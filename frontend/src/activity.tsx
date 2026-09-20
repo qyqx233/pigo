@@ -29,7 +29,7 @@ const toolGlyph: Record<string, string> = {
 // ToolArgs and ToolResult are what a tool-call part carries: the call as the
 // server described it, and how it ended. A part with no result is still
 // running — or, once the turn is over, was cut off with it.
-type ToolArgs = { detail?: string; output?: string };
+type ToolArgs = { detail?: string; output?: string; children?: ActivityItem[] };
 type ToolResult = { summary?: string; elapsedMs?: number };
 
 // turnContent lays a turn out as message parts, in the order it happened.
@@ -56,7 +56,12 @@ export function turnContent(items: ActivityItem[], text: string): ThreadAssistan
       parts.push({ type: "data", name: "compaction", data });
       return;
     }
-    const args: ToolArgs = { detail: item.detail, ...(item.output ? { output: item.output } : {}) };
+    const args: ToolArgs = {
+      detail: item.detail,
+      ...(item.output ? { output: item.output } : {}),
+      // A sub-agent's own steps, shown under its task call.
+      ...(item.children?.length ? { children: item.children } : {}),
+    };
     const done = item.status === "ok" || item.status === "error";
     parts.push({
       type: "tool-call",
@@ -74,11 +79,14 @@ export function turnContent(items: ActivityItem[], text: string): ThreadAssistan
 // cutOff marks the calls still running when a turn ended as failed: they were
 // cut off with it, and will never report.
 export function cutOff(items: ActivityItem[]): ActivityItem[] {
-  return items.map((item) =>
-    (item.kind === "tool" || item.kind === "compaction") && item.status === "running"
-      ? { ...item, status: "error" as const, text: "未完成", output: undefined }
-      : item,
-  );
+  return items.map((item) => {
+    const children = item.children ? cutOff(item.children) : undefined;
+    return (item.kind === "tool" || item.kind === "compaction") && item.status === "running"
+      ? { ...item, status: "error" as const, text: "未完成", output: undefined, ...(children ? { children } : {}) }
+      : children
+        ? { ...item, children }
+        : item;
+  });
 }
 
 // CompactionData is what a compaction part carries.
@@ -240,8 +248,43 @@ function ToolLine({
         </span>
         {status === "error" && result?.summary && <span className="activity-error">{result.summary}</span>}
         {status === "running" && args.output && <pre className="activity-output">{args.output}</pre>}
+        {args.children && args.children.length > 0 && <SubagentSteps items={args.children} />}
       </span>
     </div>
+  );
+}
+
+// SubagentSteps is what a sub-agent did, under the task call that spawned it:
+// folded to a count, expandable to its calls and what it said between them.
+function SubagentSteps({ items }: { items: ActivityItem[] }) {
+  const [open, setOpen] = useState(false);
+  const calls = items.filter((item) => item.kind === "tool").length;
+  return (
+    <span className="subagent-steps">
+      <button type="button" className="subagent-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
+        {open ? "▾" : "▸"} 子代理 {calls > 0 ? `${calls} 次调用` : "运行中"}
+      </button>
+      {open && (
+        <span className="subagent-list">
+          {items.map((item, index) =>
+            item.kind === "text" ? (
+              <span key={`t-${index}`} className="subagent-say">
+                {item.text}
+              </span>
+            ) : (
+              <ToolLine
+                key={item.id ?? `c-${index}`}
+                toolName={item.tool ?? "tool"}
+                args={{ detail: item.detail, output: item.output }}
+                result={item.status === "ok" || item.status === "error" ? { summary: item.text, elapsedMs: item.elapsedMs } : undefined}
+                isError={item.status === "error"}
+                running={item.status === "running"}
+              />
+            ),
+          )}
+        </span>
+      )}
+    </span>
   );
 }
 

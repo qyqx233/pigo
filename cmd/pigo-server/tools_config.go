@@ -28,7 +28,7 @@ import (
 
 // hostToolNames are the built-in tools the server itself provides (hostTools),
 // which an extension can replace and a naming profile can rename.
-var hostToolNames = []string{"read", "write", "edit", "grep", "find", "bash", "todo", "webfetch", "websearch"}
+var hostToolNames = []string{"read", "write", "edit", "grep", "find", "bash", "todo", "webfetch", "websearch", "task"}
 
 const (
 	defaultExtTimeout = 2 * time.Minute

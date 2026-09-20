@@ -200,7 +200,9 @@ func TestApplyExtensions(t *testing.T) {
 	if !ok || !strings.Contains(fetch.Description(), "example.com") {
 		t.Errorf("webfetch is %T", byName["webfetch"])
 	}
-	if order[len(order)-1] != "xlsx_summary" || order[0] != "read" {
+	// Replacements stay in place, additions come last — then the task tool,
+	// which hostTools adds after the extensions.
+	if order[len(order)-1] != "task" || order[len(order)-2] != "xlsx_summary" || order[0] != "read" {
 		t.Errorf("order = %v (replacements in place, additions last)", order)
 	}
 

@@ -260,6 +260,8 @@ func (r *turnRun) publish(ev streamEvent) {
 		}
 	case "tool":
 		r.foldToolLocked(ev)
+	case "subagent":
+		r.foldSubagentTextLocked(ev)
 	case "compaction":
 		r.foldCompactionLocked(ev)
 	}
@@ -268,22 +270,36 @@ func (r *turnRun) publish(ev streamEvent) {
 
 // foldToolLocked records a tool event in the activity log. The text the model
 // wrote before a call is its narration of that step, so it moves into the log.
+// A sub-agent's call (ParentID set) folds under the task call instead, leaving
+// the turn's own narration alone.
 func (r *turnRun) foldToolLocked(ev streamEvent) {
+	log := &r.activity
+	narrate := func() {
+		if narration := strings.TrimSpace(r.text.String()); narration != "" {
+			*log = append(*log, activityItem{Kind: "text", Text: narration})
+		}
+		r.text.Reset()
+	}
+	if ev.ParentID != "" {
+		parent := r.toolItemLocked(ev.ParentID)
+		if parent == nil {
+			return // its task call is gone (the turn ended): nothing to nest under
+		}
+		log = &parent.Children
+		narrate = func() {}
+	}
 	find := func() *activityItem {
-		for i := len(r.activity) - 1; i >= 0; i-- {
-			if r.activity[i].Kind == "tool" && r.activity[i].ID == ev.ID {
-				return &r.activity[i]
+		for i := len(*log) - 1; i >= 0; i-- {
+			if (*log)[i].Kind == "tool" && (*log)[i].ID == ev.ID {
+				return &(*log)[i]
 			}
 		}
 		return nil
 	}
 	switch ev.Phase {
 	case "start":
-		if narration := strings.TrimSpace(r.text.String()); narration != "" {
-			r.activity = append(r.activity, activityItem{Kind: "text", Text: narration})
-		}
-		r.text.Reset()
-		r.activity = append(r.activity, activityItem{Kind: "tool", Tool: ev.Tool, ID: ev.ID, Detail: ev.Detail, Status: "running"})
+		narrate()
+		*log = append(*log, activityItem{Kind: "tool", Tool: ev.Tool, ID: ev.ID, Detail: ev.Detail, Status: "running"})
 	case "output":
 		if item := find(); item != nil {
 			item.Output = ev.Text
@@ -296,14 +312,32 @@ func (r *turnRun) foldToolLocked(ev streamEvent) {
 		item := find()
 		if item == nil {
 			// A call the loop rejected before running it has no start.
-			if narration := strings.TrimSpace(r.text.String()); narration != "" {
-				r.activity = append(r.activity, activityItem{Kind: "text", Text: narration})
-			}
-			r.text.Reset()
-			r.activity = append(r.activity, activityItem{Kind: "tool", Tool: ev.Tool, ID: ev.ID})
-			item = &r.activity[len(r.activity)-1]
+			narrate()
+			*log = append(*log, activityItem{Kind: "tool", Tool: ev.Tool, ID: ev.ID})
+			item = &(*log)[len(*log)-1]
 		}
 		item.Status, item.Text, item.ElapsedMs, item.Output = status, ev.Text, ev.ElapsedMs, ""
+	}
+}
+
+// toolItemLocked finds a tool item of the log by call id.
+func (r *turnRun) toolItemLocked(id string) *activityItem {
+	for i := len(r.activity) - 1; i >= 0; i-- {
+		if r.activity[i].Kind == "tool" && r.activity[i].ID == id {
+			return &r.activity[i]
+		}
+	}
+	return nil
+}
+
+// foldSubagentTextLocked records what a sub-agent said between its own calls,
+// under the task call that spawned it.
+func (r *turnRun) foldSubagentTextLocked(ev streamEvent) {
+	if ev.Phase != "text" || strings.TrimSpace(ev.Text) == "" {
+		return
+	}
+	if parent := r.toolItemLocked(ev.ParentID); parent != nil {
+		parent.Children = append(parent.Children, activityItem{Kind: "text", Text: strings.TrimSpace(ev.Text)})
 	}
 }
 

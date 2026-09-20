@@ -59,6 +59,9 @@ type serverSettings struct {
 	// Scenes are the administrator's prepared prompts (scenes.go), kept here
 	// like the price table and maintained through their own endpoints.
 	Scenes []scene `json:"scenes,omitempty"`
+	// Subagent is what the task tool may do (subagent.go); nil means the
+	// built-in defaults.
+	Subagent *subagentSettings `json:"subagent,omitempty"`
 	// SandboxEnv are the variables injected into every session container
 	// (sandbox_env.go). Not secrets: a user can read them with `env` in their
 	// own sandbox.

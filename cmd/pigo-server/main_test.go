@@ -120,6 +120,7 @@ func TestHandleMessageSandboxUnavailable(t *testing.T) {
 			model:       "openrouter/free",
 			maxSessions: 8,
 		},
+		// Deliberately missing: this test is about the refusal.
 		sandbox:  Sandbox{Bwrap: filepath.Join(t.TempDir(), "missing"), Pigo: filepath.Join(t.TempDir(), "missing")},
 		db:       openTestDB(t),
 		sessions: map[string]*managedSession{},
@@ -433,10 +434,14 @@ func newTestServer(t *testing.T) *apiServer {
 		settings:     settings,
 		customModels: customModels,
 		providerName: "openrouter",
-		noTools:      true,
-		auth:         auth,
-		db:           db,
-		sessions:     map[string]*managedSession{},
+		// The host's bwrap when it has one, so a test session's tool set is the
+		// deployment's, bash included. A test that runs a command in the
+		// container calls requireSandbox first.
+		sandbox:  testSandbox(t),
+		noTools:  true,
+		auth:     auth,
+		db:       db,
+		sessions: map[string]*managedSession{},
 		loopFn: func(_ context.Context, _ *managedSession, prompt string, emit func(streamEvent)) (string, error) {
 			text := "hello:" + prompt
 			if emit != nil {
@@ -446,6 +451,25 @@ func newTestServer(t *testing.T) *apiServer {
 		},
 	}
 	return server
+}
+
+// testSandbox is the sandbox a test server gets: the host's bwrap, or a path
+// that is not there (Ready then fails, as on a machine without bwrap).
+func testSandbox(t *testing.T) Sandbox {
+	t.Helper()
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		bwrap = filepath.Join(t.TempDir(), "missing")
+	}
+	return Sandbox{Bwrap: bwrap, Pigo: filepath.Join(t.TempDir(), "unused")}
+}
+
+// requireSandbox skips a test that needs a working container.
+func requireSandbox(t *testing.T, server *apiServer) {
+	t.Helper()
+	if err := server.sandbox.Ready(); err != nil {
+		t.Skipf("sandbox unavailable: %v", err)
+	}
 }
 
 func createSession(t *testing.T, server *apiServer) string {

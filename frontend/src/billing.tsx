@@ -50,7 +50,7 @@ const statusLabel: Record<string, string> = {
   unreported: "上游未报告用量",
 };
 
-const kindLabel: Record<string, string> = { chat: "对话", compaction: "上下文压缩" };
+const kindLabel: Record<string, string> = { chat: "对话", compaction: "上下文压缩", subagent: "子代理" };
 
 // totalsOf adds calls up the way the server does, for a turn still streaming.
 export function totalsOf(calls: CallUsage[]): TurnUsage {
@@ -371,6 +371,7 @@ function Calls({ api, query, report, admin, modelKey, onModelKey }: {
             <option value="">全部类型</option>
             <option value="chat">对话</option>
             <option value="compaction">上下文压缩</option>
+            <option value="subagent">子代理</option>
           </select>
         </div>
       </div>
