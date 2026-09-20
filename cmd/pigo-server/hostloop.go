@@ -47,6 +47,9 @@ func (s *apiServer) ensureHostLoop(managed *managedSession) error {
 	if hasHostBash(tools) {
 		prompt += toolPromptNote(s.sandbox.Tools)
 	}
+	if sc := managed.meta.Scene; sc != nil {
+		prompt += sceneSystemPrompt(sc)
+	}
 	prov, providerName, err := s.resolveProvider(managed.meta.Model, managed.meta.Provider)
 	if err != nil {
 		return err
@@ -104,6 +107,16 @@ func (s *apiServer) hostTools(managed *managedSession) ([]agentcore.AgentTool, e
 		policy := run.NewToolPolicy(s.toolNames, nil)
 		tools = run.ApplyToolPolicy(tools, policy)
 	}
+	// A scene session has the scene's tools: the listed ones of the set, and
+	// the scene tools it names.
+	if sc := managed.meta.Scene; sc != nil && len(sc.Tools) > 0 {
+		tools = keepTools(tools, sc.Tools)
+		extra, err := s.sceneTools(managed, sc.Tools)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, extra...)
+	}
 	return tools, nil
 }
 
@@ -149,6 +162,26 @@ func (s *apiServer) runHostLoop(ctx context.Context, managed *managedSession, pr
 		Content:   agentcore.ContentList{agentcore.NewTextContent(prompt)},
 	})
 	cfg := managed.runCfg
+	// A scene command brings its scene tools for this turn only.
+	if names := sceneToolsFrom(ctx); len(names) > 0 {
+		extra, err := s.sceneTools(managed, names)
+		if err != nil {
+			agentCtx.Messages = agentCtx.Messages[:len(agentCtx.Messages)-1]
+			managed.mu.Unlock()
+			return "", err
+		}
+		if extra = missingTools(agentCtx.Tools, extra); len(extra) > 0 {
+			base := agentCtx.Tools
+			turnTools := append(append([]agentcore.AgentTool(nil), base...), extra...)
+			agentCtx.Tools = turnTools
+			cfg.Batch.ToolExecutorConfig.Registry = run.ToolRegistry(turnTools)
+			defer func() {
+				managed.mu.Lock()
+				agentCtx.Tools = base
+				managed.mu.Unlock()
+			}()
+		}
+	}
 	// Context compaction, with the window and threshold that apply now: an
 	// administrator's change takes effect from the next turn.
 	params := s.contextParams(managed.meta.Provider, managed.meta.Model)

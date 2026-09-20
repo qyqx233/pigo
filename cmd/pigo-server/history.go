@@ -14,6 +14,12 @@ import (
 	"github.com/smallnest/pigo/internal/session"
 )
 
+// historyScene names the scene of a scene command.
+type historyScene struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
 type historyMessage struct {
 	ID         string    `json:"id"`
 	Role       string    `json:"role"`
@@ -33,6 +39,9 @@ type historyMessage struct {
 	// Compaction is a "compaction" message's figures; its Content is the
 	// summary that replaced the earlier conversation.
 	Compaction *compactionReport `json:"compaction,omitempty"`
+	// Scene is set on a user message sent as a scene command; Content is then
+	// the command as typed ("/slug question"), not the expanded prompt.
+	Scene *historyScene `json:"scene,omitempty"`
 
 	// turn numbers the user turns: it goes up with each user message.
 	turn int
@@ -167,7 +176,12 @@ func historyMessages(sessionID string, entries []session.Entry, detail func(name
 		case agentcore.UserMessage:
 			turn++
 			if text := agentcore.ContentToText(message.Content); text != "" {
-				result = append(result, historyMessage{ID: baseID, Role: agentcore.RoleUser, Content: text, CreatedAt: entry.Timestamp})
+				m := historyMessage{ID: baseID, Role: agentcore.RoleUser, Content: text, CreatedAt: entry.Timestamp}
+				if slug, name, question, ok := parseSceneCommand(text); ok {
+					m.Content = "/" + slug + " " + question
+					m.Scene = &historyScene{Slug: slug, Name: name}
+				}
+				result = append(result, m)
 			}
 		case agentcore.AssistantMessage:
 			part := 0

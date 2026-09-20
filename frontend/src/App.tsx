@@ -19,6 +19,7 @@ import { TurnParts, cutOff, turnContent } from "./activity";
 import { navigate, navigateEvent, parsePath, type Route } from "./route";
 import { Models } from "./models";
 import { Providers } from "./providers";
+import { Scenes } from "./scenes";
 import {
   createContext,
   useContext,
@@ -43,6 +44,7 @@ import {
   type TurnStatus,
   type TurnUsage,
   type UsageTotals,
+  type SceneInfo,
   type HistoryMessage,
   type CustomModelInfo,
   type ModelInfo,
@@ -87,7 +89,15 @@ type PigoContextValue = {
   register(username: string, password: string, registrationToken?: string): Promise<void>;
   logout(): Promise<void>;
   saveSettings(settings: SessionSettings): Promise<void>;
-  newSession(): Promise<void>;
+  // newSession opens a new conversation — from a scene when one is given,
+  // with draft put in the composer.
+  newSession(scene?: string, draft?: string): Promise<void>;
+  // scenes are the enabled scenes (the welcome page, the 新会话 menu).
+  scenes: SceneInfo[];
+  reloadScenes(): void;
+  // draft is text waiting to be put in the composer, then cleared.
+  draft: string;
+  clearDraft(): void;
   selectSession(id: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
 };
@@ -194,6 +204,8 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [commands, setCommands] = useState<SlashCommandInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [scenes, setScenes] = useState<SceneInfo[]>([]);
+  const [draft, setDraft] = useState("");
   const [modelsError, setModelsError] = useState("");
   const [error, setError] = useState("");
   const [runNotice, setRunNotice] = useState("");
@@ -314,6 +326,13 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
   );
   const runtime = useLocalRuntime(adapter);
 
+  function loadScenes() {
+    void api
+      .scenes()
+      .then((list) => setScenes(list.scenes))
+      .catch(() => setScenes([]));
+  }
+
   async function loadModels() {
     setModelsError("");
     try {
@@ -382,6 +401,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
       setSessions(available.some((item) => item.id === selected.id) ? available : [selected, ...available]);
       await openSession(selected, currentUser);
       void loadModels();
+      loadScenes();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -434,6 +454,7 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
     setSessions([]);
     setCommands([]);
     setModels([]);
+    setScenes([]);
     setModelsError("");
     setSessionCost(null);
     setLastTurn(null);
@@ -460,13 +481,20 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
   // than at each button so every caller (top bar, history drawer, its "新建"
   // button) gets it. openSession itself does not navigate: it also runs on a
   // cold load of /settings/..., which must stay where the URL says.
-  async function newSession() {
+  async function newSession(scene?: string, text?: string) {
     if (!user) return;
     setError("");
+    // Already on an untouched plain conversation: stay on it rather than
+    // making another.
+    if (!scene && session?.draft && !session.scene && runtime.thread.getState().messages.length === 0) {
+      navigate("/");
+      return;
+    }
     try {
-      const created = await api.createSession();
-      setSessions((current) => [created, ...current]);
+      // A new session is a draft: it joins the list once something is sent.
+      const created = await api.createSession(scene);
       await openSession(created, user);
+      if (text) setDraft(text);
       navigate("/");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -533,6 +561,10 @@ function RuntimeProvider({ children }: { children: ReactNode }) {
         logout,
         saveSettings,
         newSession,
+        scenes,
+        reloadScenes: loadScenes,
+        draft,
+        clearDraft: () => setDraft(""),
         selectSession,
         deleteSession,
       }}
@@ -738,9 +770,7 @@ function Shell() {
         >
           <SettingsIcon />
         </button>
-        <button className="secondary-button" type="button" onClick={() => void newSession()}>
-          新会话
-        </button>
+        <NewSessionMenu />
         <button className="user-button" type="button" title="退出登录" onClick={() => void logout()}>
           <span>{user?.username.slice(0, 1).toUpperCase()}</span>
           <small>{user?.username}</small>
@@ -760,6 +790,7 @@ function Shell() {
 // extensionSourceLabel says where an extension tool comes from.
 function extensionSourceLabel(source: string): string {
   const kind = source.startsWith("go") ? "Go" : "沙箱命令";
+  if (source.endsWith("-scene")) return `${kind}，场景专用`;
   return source.endsWith("-override") ? `${kind}，替换内置` : kind;
 }
 
@@ -1015,6 +1046,7 @@ const settingsGroups: SettingsGroup[] = [
       { key: "session", label: "会话" },
       { key: "providers", label: "服务商" },
       { key: "models", label: "模型" },
+      { key: "scenes", label: "场景" },
       { key: "workspace", label: "工作区" },
       { key: "usage", label: "用量" },
       { key: "prices", label: "模型价格" },
@@ -1032,7 +1064,7 @@ const settingsGroups: SettingsGroup[] = [
 ];
 
 function SettingsPage({ tab }: { tab: string }) {
-  const { api, user, session, commands, models, modelsError, reloadModels, error, saveSettings } = usePigo();
+  const { api, user, session, commands, models, modelsError, reloadModels, reloadScenes, error, saveSettings } = usePigo();
   const [model, setModel] = useState("");
   const [thinking, setThinking] = useState("medium");
   const [saving, setSaving] = useState(false);
@@ -1219,6 +1251,7 @@ function SettingsPage({ tab }: { tab: string }) {
           <Providers api={api} isAdmin={!!user?.admin} onChanged={() => void refreshProviders()} />
         )}
         {active === "workspace" && <WorkspaceFiles />}
+        {active === "scenes" && <Scenes api={api} isAdmin={!!user?.admin} models={models} onChanged={reloadScenes} />}
 
         {user?.admin && active === "admin" && <AdminSettings api={api} models={models} />}
         {user?.admin && active === "admin-users" && <AdminUsers api={api} />}
@@ -1242,6 +1275,7 @@ function SettingsPage({ tab }: { tab: string }) {
             </div>
             <div className="capability-list">
             <div><span>服务商</span><strong>{session?.provider ?? "—"}</strong></div>
+            <div><span>场景</span><strong>{session?.scene ? `${session.scene.name}（/${session.scene.slug}）` : "无"}</strong></div>
             <div><span>Web 暂不可用命令</span><strong>{unavailableCount}</strong></div>
             <div><span>Session</span><code>{session ? session.id.slice(0, 12) : "—"}</code></div>
             <div><span>Sandbox</span><strong>{session?.sandbox ?? "—"}{session?.alive ? " · 运行中" : ""}</strong></div>
@@ -1289,6 +1323,7 @@ function SettingsPage({ tab }: { tab: string }) {
 }
 
 const commandSourceMeta: Record<string, { label: string; symbol: string }> = {
+  scene: { label: "场景", symbol: "◎" },
   builtin: { label: "内置命令", symbol: "⌘" },
   skill: { label: "技能", symbol: "✦" },
   user: { label: "Prompt", symbol: "P" },
@@ -1382,7 +1417,7 @@ function CommandBrowser({ open, onClose }: { open: boolean; onClose(): void }) {
         .toLocaleLowerCase()
         .includes(needle);
     });
-    return ["builtin", "skill", "user", "plugin"]
+    return ["scene", "builtin", "skill", "user", "plugin"]
       .map((source) => ({
         source,
         commands: filtered
@@ -1483,6 +1518,9 @@ function Thread() {
     <ThreadPrimitive.Root className="thread-root">
       <ThreadPrimitive.Viewport className="thread-viewport">
         <ThreadPrimitive.Empty>
+          {session?.scene ? (
+            <SceneWelcome />
+          ) : (
           <div className="welcome">
             <div className="welcome-copy">
               <span className="welcome-kicker">PIGO AGENT WORKSPACE</span>
@@ -1511,7 +1549,9 @@ function Thread() {
                 <i>↗</i>
               </ThreadPrimitive.Suggestion>
             </div>
+            <SceneCards />
           </div>
+          )}
         </ThreadPrimitive.Empty>
         <ThreadPrimitive.Messages
           components={{ UserMessage, AssistantMessage }}
@@ -1607,12 +1647,177 @@ function LastTurnBanner() {
 }
 
 function UserMessage() {
+  const { scenes } = usePigo();
+  const text = useAuiState((state) =>
+    state.message.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
+  );
+  // A scene command ("/slug question") says which scene it ran under.
+  const slug = /^\/([a-z][a-z0-9-]{1,31})(\s|$)/.exec(text)?.[1];
+  const scene = slug ? scenes.find((item) => item.slug === slug) : undefined;
   return (
     <MessagePrimitive.Root className="message-row user-row">
       <div className="message user-message">
+        {scene && (
+          <span className="scene-badge" title={scene.description}>
+            {scene.icon || "◎"} 场景：{scene.name}
+          </span>
+        )}
         <MessagePrimitive.Content />
       </div>
     </MessagePrimitive.Root>
+  );
+}
+
+// NewSessionMenu is the top bar's 新会话: one click for a plain conversation,
+// the caret for one started from a scene.
+function NewSessionMenu() {
+  const { newSession, scenes } = usePigo();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="new-session" ref={rootRef}>
+      <button className="secondary-button new-session-main" type="button" onClick={() => void newSession()}>
+        新会话
+      </button>
+      {scenes.length > 0 && (
+        <button
+          className="secondary-button new-session-caret"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="从场景新建会话"
+          title="从场景新建会话"
+          onClick={() => setOpen(!open)}
+        >
+          ▾
+        </button>
+      )}
+      {open && (
+        <div className="model-menu new-session-menu" role="menu">
+          <span className="eyebrow">从场景新建</span>
+          {scenes.map((scene) => (
+            <button
+              key={scene.slug}
+              type="button"
+              role="menuitem"
+              className="model-menu-item"
+              onClick={() => {
+                setOpen(false);
+                void newSession(scene.slug);
+              }}
+            >
+              <span className="model-menu-label">
+                {scene.icon || "◎"} {scene.name}
+              </span>
+              <span className="model-menu-meta">{scene.description || `/${scene.slug}`}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="model-menu-manage"
+            onClick={() => {
+              setOpen(false);
+              navigate("/settings/scenes");
+            }}
+          >
+            查看全部场景…
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// SceneCards offers the scenes on a plain conversation's welcome page. A card
+// starts a scene conversation; an example starts one with the question typed.
+function SceneCards() {
+  const { scenes, newSession } = usePigo();
+  if (scenes.length === 0) return null;
+  return (
+    <section className="scene-cards" aria-label="场景">
+      <div className="scene-cards-head">
+        <strong>场景</strong>
+        <small>为专门任务预设的提示词和工具，开启后整个会话按场景工作</small>
+      </div>
+      <div className="scene-card-grid">
+        {scenes.map((scene) => (
+          <div key={scene.slug} className="scene-card">
+            <button type="button" className="scene-card-main" onClick={() => void newSession(scene.slug)}>
+              <span className="scene-icon" aria-hidden="true">
+                {scene.icon || scene.name.slice(0, 1)}
+              </span>
+              <span>
+                <strong>{scene.name}</strong>
+                <small>{scene.description || `/${scene.slug}`}</small>
+              </span>
+              <i>↗</i>
+            </button>
+            {(scene.examples ?? []).length > 0 && (
+              <div className="scene-card-examples">
+                {scene.examples?.slice(0, 3).map((example) => (
+                  <button key={example} type="button" onClick={() => void newSession(scene.slug, example)}>
+                    {example}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// SceneWelcome is a scene conversation's empty page: what the scene does, and
+// its example questions to start from.
+function SceneWelcome() {
+  const { session, scenes } = usePigo();
+  if (!session?.scene) return null;
+  const current = session.scene;
+  const scene = scenes.find((item) => item.slug === current.slug);
+  return (
+    <div className="welcome">
+      <div className="welcome-copy">
+        <span className="welcome-kicker">场景会话 · /{current.slug}</span>
+        <div className="welcome-icon scene-welcome-icon">{current.icon || current.name.slice(0, 1)}</div>
+        <h1>{current.name}</h1>
+        <p>{scene?.description || "这个会话按场景的提示词和工具工作，模型可在顶栏切换。"}</p>
+      </div>
+      {(scene?.examples ?? []).length > 0 && (
+        <div className="starter-grid scene-examples-grid">
+          {scene?.examples?.map((example) => (
+            <ThreadPrimitive.Suggestion key={example} className="starter-card" prompt={example}>
+              <span className="starter-symbol">?</span>
+              <span>
+                <strong>{example}</strong>
+                <small>点击填入输入框</small>
+              </span>
+              <i>↗</i>
+            </ThreadPrimitive.Suggestion>
+          ))}
+        </div>
+      )}
+      <button type="button" className="ghost-button scene-welcome-link" onClick={() => navigate("/settings/scenes")}>
+        查看场景提示词
+      </button>
+    </div>
   );
 }
 

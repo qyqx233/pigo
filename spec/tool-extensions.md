@@ -169,8 +169,9 @@ func Register(name string, f Factory) // 在 init() 里调用；重名 panic
 `hostTools` 改为：
 
 1. 构造内置工具（现状）。
-2. 按配置顺序应用扩展：同名替换，否则追加。
+2. 按配置顺序应用扩展：同名替换，否则追加（`scope: scene` 的跳过）。
 3. 按 `-tools` 过滤（`all` 包含扩展）。
+4. 场景会话：按场景的工具列表过滤，并加入它列出的场景专用工具（见 `spec/preset-scenes.md`）。
 
 依赖工具名的地方不需要改：规范名没变，`hasHostBash`、`toolDetail`、提示词里的工具说明继续认规范名。活动日志摘要的规则：
 

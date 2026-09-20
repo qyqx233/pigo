@@ -56,6 +56,9 @@ type serverSettings struct {
 	DefaultContextWindow int          `json:"defaultContextWindow,omitempty"`
 	DefaultCompactPct    int          `json:"defaultCompactPct,omitempty"`
 	ModelParams          []modelParam `json:"modelParams,omitempty"`
+	// Scenes are the administrator's prepared prompts (scenes.go), kept here
+	// like the price table and maintained through their own endpoints.
+	Scenes []scene `json:"scenes,omitempty"`
 }
 
 // customProvider is one non-registry endpoint. The API key is not here: it

@@ -62,6 +62,9 @@ type extToolSpec struct {
 	Timeout     string            `yaml:"timeout"`
 	Detail      string            `yaml:"detail"`
 	Env         map[string]string `yaml:"env"`
+	// Scope is "all" (the default: every session has the tool) or "scene":
+	// only the scenes that list it get it (see scenes.go).
+	Scope string `yaml:"scope"`
 
 	// Resolved at load.
 	schema   json.RawMessage // nil: keep the implementation's
@@ -78,6 +81,9 @@ func (t *extToolSpec) source() string {
 	}
 	if t.replaces {
 		kind += "-override"
+	}
+	if t.Scope == "scene" {
+		kind += "-scene"
 	}
 	return kind
 }
@@ -189,7 +195,8 @@ func (x *toolExtensions) addedNames() []string {
 	}
 	var out []string
 	for _, t := range x.tools {
-		if !t.replaces {
+		// A scene tool is not in a session's own set.
+		if !t.replaces && t.Scope != "scene" {
 			out = append(out, t.Name)
 		}
 	}
@@ -326,6 +333,16 @@ func resolveExtTool(t *extToolSpec, builtin map[string]bool, lookupEnv func(stri
 		return errors.New("name must be lowercase letters, digits and underscores, starting with a letter")
 	}
 	t.replaces = builtin[t.Name]
+	switch t.Scope = strings.ToLower(strings.TrimSpace(t.Scope)); t.Scope {
+	case "", "all":
+		t.Scope = "all"
+	case "scene":
+		if t.replaces {
+			return errors.New("scope: scene cannot replace a built-in: a built-in is in every session")
+		}
+	default:
+		return fmt.Errorf("scope %q: use all or scene", t.Scope)
+	}
 	t.Command, t.Go = strings.TrimSpace(t.Command), strings.TrimSpace(t.Go)
 	switch {
 	case t.Command == "" && t.Go == "":

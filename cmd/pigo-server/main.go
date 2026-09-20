@@ -265,6 +265,10 @@ func main() {
 	mux.Handle("PUT /api/admin/providers", admin(api.handlePutCustomProvider))
 	mux.Handle("DELETE /api/admin/providers/{name}", admin(api.handleDeleteCustomProvider))
 	mux.Handle("PATCH /api/admin/providers/{name}", admin(api.handlePatchCustomProvider))
+	mux.Handle("GET /api/scenes", api.requirePrincipal(http.HandlerFunc(api.handleListScenes)))
+	mux.Handle("GET /api/admin/scenes", admin(api.handleAdminScenes))
+	mux.Handle("PUT /api/admin/scenes/{slug}", admin(api.handlePutScene))
+	mux.Handle("DELETE /api/admin/scenes/{slug}", admin(api.handleDeleteScene))
 	mux.Handle("GET /api/model-params", api.requirePrincipal(http.HandlerFunc(api.handleListModelParams)))
 	mux.Handle("PUT /api/admin/model-params", admin(api.handlePutModelParam))
 	mux.Handle("DELETE /api/admin/model-params", admin(api.handleDeleteModelParam))
@@ -480,10 +484,32 @@ func (s *apiServer) handleCommands(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, webCommands())
+	writeJSON(w, http.StatusOK, append(webCommands(), s.sceneCommands()...))
+}
+
+// createSessionRequest is the optional body of POST /api/sessions.
+type createSessionRequest struct {
+	// Scene starts the session from a scene (its slug).
+	Scene string `json:"scene,omitempty"`
 }
 
 func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	var request createSessionRequest
+	if r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &request); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	var sc *scene
+	if slug := strings.TrimSpace(request.Scene); slug != "" {
+		found, ok := s.settings.scene(strings.ToLower(slug))
+		if !ok || found.Disabled {
+			writeError(w, http.StatusNotFound, "场景不存在或已停用")
+			return
+		}
+		sc = &found
+	}
 	id, err := randomID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create session id")
@@ -505,6 +531,17 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 	if _, resolved, err := s.resolveModel(userID, model, ""); err == nil {
 		providerName = resolved
 	}
+	// A scene's own model and effort, when it names them and they resolve.
+	if sc != nil {
+		if sc.Model != "" {
+			if _, resolved, err := s.resolveModel(userID, sc.Model, sc.Provider); err == nil {
+				model, providerName = sc.Model, resolved
+			}
+		}
+		if sc.Thinking != "" {
+			thinking = sc.Thinking
+		}
+	}
 	managed := &managedSession{
 		paths: paths,
 		meta: sessionMeta{
@@ -514,6 +551,7 @@ func (s *apiServer) handleCreateSession(w http.ResponseWriter, r *http.Request) 
 			Provider:  providerName,
 			Thinking:  thinking,
 			Tools:     append([]string(nil), s.toolNames...),
+			Scene:     sceneSnapshotOf(sc),
 			CreatedAt: now,
 			LastUsed:  now,
 		},
@@ -695,12 +733,31 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		managed.meta.Title = cleanSessionTitle(request.Prompt)
 	}
 	userID := principalForRequest(r).UserID
-	prompt, prefix, complete, err := resolveWebInput(&managed.meta, request.Prompt, s.resolverFor(userID),
-		func(filter string) string { return s.modelListing(r, userID, filter) })
-	if err != nil {
-		managed.mu.Unlock()
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	var (
+		prompt, prefix string
+		complete       bool
+		sceneTools     []string
+	)
+	if sc, question, ok := s.sceneCommand(request.Prompt); ok {
+		// "/slug question" runs the question under the scene for this turn;
+		// a bare "/slug" says how to use it.
+		if question == "" {
+			prefix, complete = sceneUsage(sc), true
+		} else {
+			prompt, sceneTools = sceneCommandMessage(sc, question), sc.Tools
+		}
+	} else {
+		var err error
+		prompt, prefix, complete, err = resolveWebInput(&managed.meta, request.Prompt, s.resolverFor(userID),
+			func(filter string) string { return s.modelListing(r, userID, filter) })
+		if err != nil {
+			managed.mu.Unlock()
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if complete && strings.Fields(request.Prompt)[0] == "/help" {
+			prefix += s.sceneHelp()
+		}
 	}
 	_ = s.saveSession(managed.meta)
 	stream := r.URL.Query().Get("stream") == "true"
@@ -723,7 +780,7 @@ func (s *apiServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	run, snapshot, sub, err := s.startTurn(managed, prompt, prefix)
+	run, snapshot, sub, err := s.startTurn(managed, prompt, prefix, sceneTools)
 	managed.mu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
@@ -934,6 +991,9 @@ func sessionResponse(managed *managedSession) map[string]any {
 		"pigoSessionId": m.PigoSessionID,
 		"sandbox":       "bwrap",
 		"alive":         managed.liveAlive(),
+	}
+	if m.Scene != nil {
+		out["scene"] = map[string]any{"slug": m.Scene.Slug, "name": m.Scene.Name, "icon": m.Scene.Icon}
 	}
 	// turn is the running (or just-finished) turn; lastTurn how the last one
 	// ended, which survives restarts — including a turn a crash interrupted.

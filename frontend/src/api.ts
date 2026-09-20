@@ -30,7 +30,40 @@ export type SessionInfo = {
   // ended, kept across restarts.
   turn?: TurnInfo;
   lastTurn?: TurnInfo;
+  // scene: the scene the session was created from.
+  scene?: SessionScene;
+  // draft: nothing sent in it yet — the server has not stored it, and it is
+  // not in the session list.
+  draft?: boolean;
 };
+
+export type SessionScene = { slug: string; name: string; icon?: string };
+
+// SceneInfo is a scene: a prepared prompt for one kind of task, with the
+// tools and default model it runs on (see spec/preset-scenes.md).
+export type SceneInfo = {
+  slug: string;
+  name: string;
+  icon?: string;
+  description?: string;
+  prompt: string;
+  examples?: string[];
+  tools?: string[];
+  model?: string;
+  provider?: string;
+  thinking?: string;
+  disabled?: boolean;
+  order?: number;
+  updatedBy?: string;
+  updatedAt?: string;
+  // missingTools: listed tools the tools config no longer has.
+  missingTools?: string[];
+};
+
+// SceneToolInfo is a tool a scene can list; scene: only scenes get it.
+export type SceneToolInfo = { name: string; description?: string; builtin?: boolean; scene?: boolean };
+
+export type SceneList = { scenes: SceneInfo[]; tools: SceneToolInfo[] };
 
 // TurnInfo describes one turn: a user message and everything the agent did
 // about it. A turn runs on the server independently of the page.
@@ -93,6 +126,8 @@ export type HistoryMessage = {
   usage?: TurnUsage;
   // A "compaction" message's figures; its content is the summary.
   compaction?: CompactionReport;
+  // scene: a user message sent as a scene command; content is the command.
+  scene?: { slug: string; name: string };
 };
 
 // CompactionReport is a context compaction's figures, in estimated tokens.
@@ -492,11 +527,11 @@ export class PigoAPI {
     return this.request<SessionInfo[]>("/api/sessions", { headers: this.headers() });
   }
 
-  async createSession(): Promise<SessionInfo> {
+  async createSession(scene?: string): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/sessions", {
       method: "POST",
       headers: this.headers(true),
-      body: "{}",
+      body: JSON.stringify(scene ? { scene } : {}),
     });
     this.session = session;
     return session;
@@ -622,6 +657,33 @@ export class PigoAPI {
     });
   }
 
+  async scenes(): Promise<SceneList> {
+    return this.request<SceneList>("/api/scenes", { headers: this.headers() });
+  }
+
+  async adminScenes(): Promise<SceneList> {
+    return this.request<SceneList>("/api/admin/scenes", { headers: this.headers() });
+  }
+
+  // putScene creates a scene (from "") or saves over one; a different slug
+  // renames it.
+  async putScene(from: string, scene: SceneInfo): Promise<SceneList> {
+    const { missingTools: _missing, updatedAt: _at, updatedBy: _by, ...body } = scene;
+    return this.request<SceneList>(`/api/admin/scenes/${encodeURIComponent(from || "new")}`, {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify(body),
+    });
+  }
+
+  async deleteScene(slug: string): Promise<SceneList> {
+    return this.request<SceneList>(`/api/admin/scenes/${encodeURIComponent(slug)}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  async subagent(): Promise<SubagentView> {
   async adminModels(): Promise<CustomModelInfo[]> {
     return this.request<CustomModelInfo[]>("/api/admin/models", { headers: this.headers() });
   }

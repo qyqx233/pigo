@@ -39,10 +39,13 @@ func (s *apiServer) turnLimits() turnLimits {
 }
 
 // startTurn starts a turn for prompt in the background and subscribes the
-// caller before it starts, so the caller sees every event. Caller holds
-// managed.mu.
-func (s *apiServer) startTurn(managed *managedSession, prompt, prefix string) (*turnRun, streamEvent, *turnSub, error) {
+// caller before it starts, so the caller sees every event. sceneTools are the
+// scene tools a scene command brings to the turn. Caller holds managed.mu.
+func (s *apiServer) startTurn(managed *managedSession, prompt, prefix string, sceneTools []string) (*turnRun, streamEvent, *turnSub, error) {
 	return s.startTurnWith(managed, func(ctx context.Context, run *turnRun) (string, error) {
+		if len(sceneTools) > 0 {
+			ctx = withSceneTools(ctx, sceneTools)
+		}
 		if prefix != "" {
 			run.publish(streamEvent{Type: "delta", Text: prefix + "\n\n"})
 		}

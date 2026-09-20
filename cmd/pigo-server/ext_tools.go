@@ -238,12 +238,15 @@ func (t *configuredTool) Detail(args json.RawMessage) string {
 
 // applyExtensions puts the configured extensions into a session's tool set,
 // in config order: a name already in the set is replaced where it stands, a new
-// one is appended.
+// one is appended. Scene tools are left out; sceneTools adds them.
 func (s *apiServer) applyExtensions(managed *managedSession, tools []agentcore.AgentTool) ([]agentcore.AgentTool, error) {
 	if s.exts == nil {
 		return tools, nil
 	}
 	for _, spec := range s.exts.tools {
+		if spec.Scope == "scene" {
+			continue
+		}
 		at := -1
 		for i, t := range tools {
 			if t.Name() == spec.Name {
@@ -255,19 +258,9 @@ func (s *apiServer) applyExtensions(managed *managedSession, tools []agentcore.A
 		if at >= 0 {
 			builtin = tools[at]
 		}
-		var tool agentcore.AgentTool
-		if spec.Command != "" {
-			tool = &extCommandTool{spec: spec, server: s, session: managed}
-		} else {
-			factory, _ := ext.Lookup(spec.Go) // checked at load
-			built, err := factory(extSession{server: s, managed: managed}, builtin, spec.env)
-			if err != nil {
-				return nil, fmt.Errorf("tool %s (%s): %w", spec.Name, spec.Go, err)
-			}
-			if built == nil {
-				return nil, fmt.Errorf("tool %s (%s): the extension built no tool", spec.Name, spec.Go)
-			}
-			tool = &configuredTool{AgentTool: built, name: spec.Name, description: strings.TrimSpace(spec.Description), schema: spec.schema}
+		tool, err := s.buildExtTool(managed, spec, builtin)
+		if err != nil {
+			return nil, err
 		}
 		if at >= 0 {
 			tools[at] = tool
@@ -276,6 +269,41 @@ func (s *apiServer) applyExtensions(managed *managedSession, tools []agentcore.A
 		}
 	}
 	return tools, nil
+}
+
+// sceneTools builds the scene tools among names for a session; other names
+// are skipped.
+func (s *apiServer) sceneTools(managed *managedSession, names []string) ([]agentcore.AgentTool, error) {
+	var out []agentcore.AgentTool
+	for _, name := range names {
+		spec, ok := s.exts.tool(name)
+		if !ok || spec.Scope != "scene" {
+			continue
+		}
+		tool, err := s.buildExtTool(managed, spec, nil)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tool)
+	}
+	return out, nil
+}
+
+// buildExtTool makes one configured extension for a session; builtin is the
+// tool it replaces, or nil.
+func (s *apiServer) buildExtTool(managed *managedSession, spec *extToolSpec, builtin agentcore.AgentTool) (agentcore.AgentTool, error) {
+	if spec.Command != "" {
+		return &extCommandTool{spec: spec, server: s, session: managed}, nil
+	}
+	factory, _ := ext.Lookup(spec.Go) // checked at load
+	built, err := factory(extSession{server: s, managed: managed}, builtin, spec.env)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s (%s): %w", spec.Name, spec.Go, err)
+	}
+	if built == nil {
+		return nil, fmt.Errorf("tool %s (%s): the extension built no tool", spec.Name, spec.Go)
+	}
+	return &configuredTool{AgentTool: built, name: spec.Name, description: strings.TrimSpace(spec.Description), schema: spec.schema}, nil
 }
 
 // toolDetail says what a call shows in the activity log: the config's detail

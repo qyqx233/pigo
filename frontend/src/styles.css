@@ -4124,3 +4124,422 @@ button {
 [data-theme="light"] .usage-share {
   background: #e3e8e1;
 }
+
+/* --- scenes ------------------------------------------------------------------ */
+
+/* The top bar's 新会话 with its scene menu: one split button. */
+.new-session {
+  position: relative;
+  display: flex;
+}
+
+.new-session-main:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.new-session-caret {
+  padding: 0 9px;
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  color: #9299a9;
+}
+
+.new-session-menu {
+  gap: 2px;
+  width: min(340px, calc(100vw - 32px));
+}
+
+.new-session-menu .model-menu-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.new-session-menu .model-menu-label {
+  font-weight: 600;
+}
+
+.new-session-menu .model-menu-meta {
+  overflow: hidden;
+  font-family: inherit;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-session-menu .eyebrow {
+  margin: 2px 6px 6px;
+}
+
+/* A scene command's user bubble names its scene. */
+.scene-badge {
+  display: inline-block;
+  margin-bottom: 4px;
+  padding: 1px 8px;
+  color: #9aefad;
+  border-radius: 999px;
+  background: rgb(120 224 143 / 10%);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.user-message .scene-badge {
+  display: block;
+  width: fit-content;
+  margin-left: auto;
+}
+
+.scene-cards {
+  width: min(100%, 790px);
+  margin-top: 28px;
+}
+
+.scene-cards-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.scene-cards-head small {
+  color: #858d9d;
+  font-size: 11.5px;
+}
+
+.scene-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.scene-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #282e39;
+  border-radius: 14px;
+  background: linear-gradient(145deg, rgb(24 28 36 / 86%), rgb(15 18 24 / 88%));
+  transition: border-color 140ms ease;
+}
+
+.scene-card:hover {
+  border-color: #455063;
+}
+
+.scene-card-main {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  padding: 13px;
+  color: #dce1e9;
+  text-align: left;
+  border: 0;
+  background: transparent;
+}
+
+.scene-card-main > span:nth-child(2) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.scene-card-main strong {
+  font-size: 13px;
+}
+
+.scene-card-main small {
+  overflow: hidden;
+  color: #858d9d;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-card-main i {
+  align-self: start;
+  color: #5e6675;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.scene-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  color: #8ceca1;
+  border: 1px solid rgb(120 224 143 / 18%);
+  border-radius: 10px;
+  background: rgb(120 224 143 / 8%);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.scene-card-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 13px 12px;
+}
+
+.scene-card-examples button {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 9px;
+  color: #a9b0bd;
+  border: 1px solid #2a303c;
+  border-radius: 999px;
+  background: #11141b;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-card-examples button:hover {
+  color: #dce1e9;
+  border-color: #455063;
+}
+
+.scene-welcome-icon {
+  font-size: 24px;
+}
+
+.scene-examples-grid {
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+
+.scene-examples-grid .starter-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-welcome-link {
+  width: auto;
+  margin-top: 18px;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* The settings panel. */
+.provider-list .scene-summary {
+  grid-template-columns: 36px minmax(0, 2fr) auto auto auto;
+}
+
+.scene-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.scene-title strong {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.scene-title small {
+  overflow: hidden;
+  color: #858d9d;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-slug {
+  color: #9aefad;
+  font-size: 12px;
+}
+
+.scene-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.scene-facts dt {
+  color: #6b7280;
+}
+
+.scene-facts dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+}
+
+.scene-tool {
+  padding: 0 6px;
+  border-radius: 5px;
+  background: #1b2029;
+  font-size: 11.5px;
+}
+
+.scene-tool.missing {
+  color: #f08c8c;
+  text-decoration: line-through;
+}
+
+.scene-examples span {
+  padding: 0 8px;
+  color: #a9b0bd;
+  border: 1px solid #2a303c;
+  border-radius: 999px;
+  font-size: 11.5px;
+}
+
+.scene-prompt,
+.scene-preview pre {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: 11px 13px;
+  color: #c9ced8;
+  border: 1px solid #222935;
+  border-radius: 8px;
+  background: #0d1016;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.scene-editor-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr);
+}
+
+.scene-editor-grid .scene-wide {
+  grid-column: 1 / -1;
+}
+
+.scene-editor-grid label:nth-last-child(2) {
+  grid-column: span 2;
+}
+
+.scene-editor-grid label:last-child {
+  grid-column: span 2;
+}
+
+.scene-textarea {
+  height: auto;
+  min-height: 220px;
+  padding: 9px 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.scene-textarea.small {
+  min-height: 72px;
+  font-family: inherit;
+}
+
+.scene-tools {
+  margin-top: 4px;
+}
+
+.scene-tool-group {
+  margin-top: 10px;
+}
+
+.scene-tool-group .eyebrow {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.scene-tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.scene-tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  color: #a9b0bd;
+  border: 1px solid #2a303c;
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.scene-tool-chip input {
+  display: none;
+}
+
+.scene-tool-chip.on {
+  color: #9aefad;
+  border-color: rgb(120 224 143 / 35%);
+  background: rgb(120 224 143 / 8%);
+}
+
+.scene-preview {
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.scene-preview summary {
+  margin-bottom: 8px;
+  color: #9299a9;
+  cursor: pointer;
+}
+
+.scene-disabled-toggle {
+  margin-top: 0;
+}
+
+@media (max-width: 720px) {
+  .scene-editor-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .provider-list .scene-summary {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+  }
+
+  .scene-slug,
+  .scene-summary .provider-model-count {
+    display: none;
+  }
+}
+
+[data-theme="light"] .scene-card,
+[data-theme="light"] .scene-card-examples button {
+  border-color: #dde2da;
+  background: #f4f6f1;
+}
+
+[data-theme="light"] .scene-card-main {
+  color: #29332d;
+}
+
+[data-theme="light"] .scene-badge,
+[data-theme="light"] .scene-slug,
+[data-theme="light"] .scene-tool-chip.on {
+  color: #24723b;
+}
+
+[data-theme="light"] .scene-prompt,
+[data-theme="light"] .scene-preview pre {
+  color: #29332d;
+  border-color: #dde2da;
+  background: #fbfcfa;
+}
+
+[data-theme="light"] .scene-tool {
+  background: #e7ece5;
+}
+

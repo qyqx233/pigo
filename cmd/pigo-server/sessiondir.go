@@ -28,16 +28,18 @@ func newSessionPaths(dataDir, id string) sessionPaths {
 }
 
 type sessionMeta struct {
-	ID            string    `json:"id"`
-	UserID        string    `json:"userId,omitempty"`
-	Title         string    `json:"title,omitempty"`
-	PigoSessionID string    `json:"pigoSessionId,omitempty"`
-	Model         string    `json:"model"`
-	Provider      string    `json:"provider"`
-	Thinking      string    `json:"thinking"`
-	Tools         []string  `json:"tools"`
-	CreatedAt     time.Time `json:"createdAt"`
-	LastUsed      time.Time `json:"lastUsed"`
+	ID            string   `json:"id"`
+	UserID        string   `json:"userId,omitempty"`
+	Title         string   `json:"title,omitempty"`
+	PigoSessionID string   `json:"pigoSessionId,omitempty"`
+	Model         string   `json:"model"`
+	Provider      string   `json:"provider"`
+	Thinking      string   `json:"thinking"`
+	Tools         []string `json:"tools"`
+	// Scene is the scene the session was created from, as it was then.
+	Scene     *sceneSnapshot `json:"scene,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+	LastUsed  time.Time      `json:"lastUsed"`
 	// ActiveTurn is set while a turn runs and cleared when it ends; one found
 	// at startup is a turn the previous process never finished.
 	ActiveTurn *turnRecord `json:"activeTurn,omitempty"`
