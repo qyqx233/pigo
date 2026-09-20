@@ -180,3 +180,14 @@ cmd/pigo-server/sandbox-python/build.sh [-p 3.12] [-o 目标目录] [-r 包清�
 - **架构与系统**：构建产物只能用于 x86_64 Linux（与构建机相同的架构）。python-build-standalone 对 glibc 版本要求很低，常见发行版都能用。
 - **体积**：产物约 370MB，每台服务器一份，所有会话共用。
 - **现有的 `/usr/local/bin` 暴露**：它现在整个对沙箱可见，本机里有 47 个工具。这和本计划无关，但属于同一类问题，可以另行评估是否收紧。
+
+## 11. 沙箱环境变量（管理员可配置，2026-09-20）
+
+容器以 `--clearenv` 启动，只有 `HOME`、`PIGO_HOME`、`PATH`、`USER`、`TERM` 由沙箱自己设置——服务端的环境变量（包括各家 Provider 的 Key）不会进去。需要代理或内网地址的工具因此也拿不到配置，于是加一份管理员维护的注入列表。
+
+- 存放在 settings 文档的 `sandboxEnv`（`cmd/pigo-server/sandbox_env.go`），`sandboxSpec` 把它作为 `RunSpec.Env` 传给 `mountArgs`，逐条变成 `--setenv`。
+- 校验：变量名 `[A-Za-z_][A-Za-z0-9_]{0,63}`；值非空、不含换行和空字符、不超过 4096 字符；`HOME`、`PIGO_HOME`、`PATH`、`LD_PRELOAD`、`LD_LIBRARY_PATH`、`LD_AUDIT` 拒绝（前三个由沙箱设置，后三个会改变容器里每条命令的加载行为）。
+- 接口（管理员）：`GET /api/admin/sandbox-env`、`PUT /api/admin/sandbox-env`（按名新增或覆盖）、`DELETE /api/admin/sandbox-env/{name}`。返回里的 `runningOld` 是仍在运行的容器数（它们保留启动时的环境变量），`processHint` 是服务端自己的 `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`，前端做成一键填入。
+- UI：设置 → 部署 → 「沙箱环境变量」。写清楚"任何用户都能在自己的沙箱里用 `env` 读到"——这里不能放 Key。
+- 生效范围：新建的容器立即生效；已运行的容器要等闲置回收或重启。命令工具（tools.yaml）在同一个容器里跑，自然继承；工具自己的 `env:` 优先级更高。
+- 典型用途：`HTTPS_PROXY=http://192.168.50.42:10808` + `NO_PROXY=localhost,127.0.0.1,192.168.0.0/16`，让容器里的 curl / 抓取类工具能出网。代理地址必须带端口，curl 对省略端口的代理默认用 1080。

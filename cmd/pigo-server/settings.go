@@ -59,6 +59,10 @@ type serverSettings struct {
 	// Scenes are the administrator's prepared prompts (scenes.go), kept here
 	// like the price table and maintained through their own endpoints.
 	Scenes []scene `json:"scenes,omitempty"`
+	// SandboxEnv are the variables injected into every session container
+	// (sandbox_env.go). Not secrets: a user can read them with `env` in their
+	// own sandbox.
+	SandboxEnv []sandboxEnvVar `json:"sandboxEnv,omitempty"`
 }
 
 // customProvider is one non-registry endpoint. The API key is not here: it

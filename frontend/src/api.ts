@@ -684,6 +684,24 @@ export class PigoAPI {
   }
 
   async subagent(): Promise<SubagentView> {
+    return this.request<SandboxEnvList>("/api/admin/sandbox-env", { headers: this.headers() });
+  }
+
+  async putSandboxEnv(name: string, value: string): Promise<SandboxEnvList> {
+    return this.request<SandboxEnvList>("/api/admin/sandbox-env", {
+      method: "PUT",
+      headers: this.headers(true),
+      body: JSON.stringify({ name, value }),
+    });
+  }
+
+  async deleteSandboxEnv(name: string): Promise<SandboxEnvList> {
+    return this.request<SandboxEnvList>(`/api/admin/sandbox-env/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
   async adminModels(): Promise<CustomModelInfo[]> {
     return this.request<CustomModelInfo[]>("/api/admin/models", { headers: this.headers() });
   }

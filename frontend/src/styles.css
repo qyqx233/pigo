@@ -4543,3 +4543,303 @@ button {
   background: #e7ece5;
 }
 
+/* --- sandbox environment variables (deployment panel) ----------------------- */
+
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.env-list li {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.6fr) minmax(0, 1.4fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+/* The saved rows and the add row are the same three columns, so every cell is
+   one 32px box: a name that is plain text next to a boxed input reads as
+   misaligned even when the baselines agree. */
+.env-list code {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  overflow: hidden;
+  padding: 0 9px;
+  color: #9aefad;
+  border: 1px solid #222935;
+  border-radius: 8px;
+  background: #0d1016;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-value {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  overflow: hidden;
+  padding: 0 9px;
+  color: #c9ced8;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #0d1016;
+  cursor: text;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-value:hover {
+  border-color: #333a46;
+}
+
+.env-list .settings-input,
+.env-add .settings-input {
+  height: 32px;
+  margin: 0;
+  padding: 0 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.env-list .ghost-button,
+.env-add .ghost-button,
+.env-hints .ghost-button {
+  width: auto;
+  height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.env-add {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.6fr) minmax(0, 1.4fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+/* The form rule that spaces stacked inputs (.settings-input + .settings-input)
+   would push the value box out of line with the name box. */
+.env-add .settings-input + .settings-input,
+.env-list .settings-input + .settings-input {
+  margin-top: 0;
+}
+
+.env-hints {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: #6b7280;
+  font-size: 11.5px;
+}
+
+.env-hints .ghost-button {
+  height: 28px;
+  padding: 3px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .env-list li,
+  .env-add {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
+[data-theme="light"] .env-list code {
+  color: #24723b;
+  border-color: #dde2da;
+  background: #fbfcfa;
+}
+
+[data-theme="light"] .env-value {
+  color: #29332d;
+  border-color: transparent;
+  background: #fbfcfa;
+}
+
+[data-theme="light"] .env-value:hover {
+  border-color: #dde2da;
+}
+
+/* --- per-model parameters ---------------------------------------------------- */
+
+.param-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.param-list li {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 0.8fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.param-head {
+  color: #6b7280;
+  font-size: 11.5px;
+}
+
+.param-head span {
+  padding: 0 2px;
+}
+
+/* The model cell is text next to boxed inputs, so it gets the same 32px box. */
+.param-model {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  height: 32px;
+  overflow: hidden;
+  padding: 0 9px;
+  border: 1px solid #222935;
+  border-radius: 8px;
+  background: #0d1016;
+}
+
+.param-model code {
+  overflow: hidden;
+  color: #c9ced8;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.param-model small {
+  flex: none;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.param-list .settings-input {
+  height: 32px;
+  margin: 0;
+  padding: 0 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.param-list .settings-input + .settings-input {
+  margin-top: 0;
+}
+
+.param-list .ghost-button {
+  width: auto;
+  height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .param-list li {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .param-head {
+    display: none;
+  }
+
+  .param-model {
+    grid-column: 1 / -1;
+  }
+}
+
+[data-theme="light"] .param-model {
+  border-color: #dde2da;
+  background: #fbfcfa;
+}
+
+[data-theme="light"] .param-model code {
+  color: #29332d;
+}
+
+/* --- sub-agent steps and settings ------------------------------------------- */
+
+.subagent-steps {
+  display: block;
+  margin-top: 4px;
+}
+
+.subagent-toggle {
+  padding: 1px 7px;
+  color: #8ceca1;
+  border: 1px solid rgb(120 224 143 / 20%);
+  border-radius: 999px;
+  background: rgb(120 224 143 / 7%);
+  font-size: 10.5px;
+}
+
+.subagent-list {
+  display: block;
+  margin: 5px 0 2px;
+  padding-left: 10px;
+  border-left: 1px solid #2a303c;
+}
+
+.subagent-list .activity-line {
+  padding-left: 0;
+}
+
+.subagent-say {
+  display: block;
+  margin: 3px 0 5px;
+  color: #9299a9;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.subagent-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.subagent-grid small {
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.subagent-models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.subagent-models-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.subagent-models-head .ghost-button {
+  width: auto;
+  height: 28px;
+  padding: 3px 12px;
+  font-size: 12px;
+}
+
+[data-theme="light"] .subagent-toggle {
+  color: #24723b;
+  border-color: rgb(36 114 59 / 25%);
+  background: rgb(36 114 59 / 7%);
+}
+
+[data-theme="light"] .subagent-list {
+  border-left-color: #dde2da;
+}

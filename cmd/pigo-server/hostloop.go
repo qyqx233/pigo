@@ -22,7 +22,10 @@ func (s *apiServer) sandboxSpec(managed *managedSession) RunSpec {
 		Home:       managed.paths.Home,
 		NoSkills:   !s.config.skills,
 		SkillsHost: skillsDir(),
-		// Env stays empty: provider keys never enter the sandbox.
+		// Only what an administrator configured (a proxy, a tool's endpoint):
+		// the server's own environment, and with it the provider keys, never
+		// enters the sandbox.
+		Env: s.settings.sandboxEnvPairs(),
 	}
 }
 

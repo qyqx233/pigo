@@ -163,6 +163,12 @@ export function AdminSettings({ api, models }: { api: PigoAPI; models: ModelInfo
             </label>
           </div>
 
+          <Subagent api={api} report={report} models={models} shared={shared} />
+
+          <ModelParams api={api} report={report} models={models} shared={shared} />
+
+          <SandboxEnv api={api} report={report} />
+
           <div className="admin-save-bar">
             <span>{dirty ? "有未保存的修改" : "已是最新"}</span>
             <div className="context-editor-actions">
