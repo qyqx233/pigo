@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +52,7 @@ func collect(t *testing.T, s *provider.AssistantMessageEventStream) []provider.A
 // ends with an error the retry policy treats as transient.
 func TestStallGuardAbandonsSilentCall(t *testing.T) {
 	cancelled := make(chan struct{})
-	guarded := guardStream(hangingStream(nil, cancelled), 50*time.Millisecond)
+	guarded := guardStream(hangingStream(nil, cancelled), 50*time.Millisecond, 50*time.Millisecond, "test")
 	s, err := guarded(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +88,7 @@ func TestStallGuardKeepsPartial(t *testing.T) {
 	partial := agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant,
 		Content: agentcore.ContentList{agentcore.NewTextContent("half an ans")}}
 	cancelled := make(chan struct{})
-	guarded := guardStream(hangingStream(provider.StreamTextEvent{Partial: partial}, cancelled), 50*time.Millisecond)
+	guarded := guardStream(hangingStream(provider.StreamTextEvent{Partial: partial}, cancelled), 50*time.Millisecond, 50*time.Millisecond, "test")
 	s, _ := guarded(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
 	events := collect(t, s)
 	if len(events) != 2 {
@@ -109,6 +110,9 @@ func TestStallGuardLeavesProgressingCall(t *testing.T) {
 			msg := agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant}
 			for i := 0; i < 10; i++ {
 				time.Sleep(20 * time.Millisecond)
+				// The message has to grow: the guard watches output, not
+				// traffic, so a partial that never changes is a stall.
+				msg.Content = agentcore.ContentList{agentcore.NewTextContent(strings.Repeat("x", i+1))}
 				if s.Emit(ctx, provider.StreamTextEvent{Partial: msg}) != nil {
 					return
 				}
@@ -119,9 +123,111 @@ func TestStallGuardLeavesProgressingCall(t *testing.T) {
 		return s, nil
 	}
 	// 200ms in total, never more than 20ms between events, guard at 60ms.
-	s, _ := guardStream(slow, 60*time.Millisecond)(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
+	s, _ := guardStream(slow, 60*time.Millisecond, 60*time.Millisecond, "test")(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
 	events := collect(t, s)
 	if _, ok := events[len(events)-1].(provider.StreamDoneEvent); !ok || len(events) != 11 {
 		t.Fatalf("events = %d, last = %#v", len(events), events[len(events)-1])
+	}
+}
+
+// TestStallGuardIgnoresContentlessEvents is the case that got past the guard in
+// production: an upstream that keeps sending events while producing nothing.
+// Resetting the timer on every event let such a call hang for as long as the
+// traffic continued — six minutes, in the session that prompted this.
+func TestStallGuardIgnoresContentlessEvents(t *testing.T) {
+	cancelled := make(chan struct{})
+	heartbeats := func(ctx context.Context, _ string, _ provider.LlmContext, _ provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		s := provider.NewAssistantMessageEventStream(0)
+		go func() {
+			defer s.Close()
+			defer close(cancelled)
+			empty := agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Millisecond):
+					if s.Emit(ctx, provider.StreamTextEvent{Partial: empty}) != nil {
+						return
+					}
+				}
+			}
+		}()
+		return s, nil
+	}
+	guarded := guardStream(heartbeats, 80*time.Millisecond, 80*time.Millisecond, "test")
+	s, err := guarded(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collect(t, s)
+	last, ok := events[len(events)-1].(provider.StreamErrorEvent)
+	if !ok {
+		t.Fatalf("the call was not abandoned: %#v", events[len(events)-1])
+	}
+	stall, ok := last.Err.(*streamStallError)
+	if !ok || !stall.silent {
+		t.Fatalf("error = %#v, want a stall reported as having produced nothing", last.Err)
+	}
+	// Nothing reached the user, so the loop may simply re-issue the call.
+	if !stall.Transient() {
+		t.Error("a silent call is not retryable")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Error("the upstream call was not cancelled")
+	}
+}
+
+// TestStreamFirstByteTimeout: the first-byte deadline is the shorter of the
+// two, and never outlives the idle one.
+func TestStreamFirstByteTimeout(t *testing.T) {
+	if got := streamFirstByteTimeout(defaultStreamIdle); got != defaultStreamFirstByte {
+		t.Errorf("first byte = %s, want %s", got, defaultStreamFirstByte)
+	}
+	if got := streamFirstByteTimeout(30 * time.Second); got != 30*time.Second {
+		t.Errorf("with a shorter idle limit, first byte = %s, want 30s", got)
+	}
+	t.Setenv("PIGO_STREAM_FIRST_BYTE_TIMEOUT", "10s")
+	if got := streamFirstByteTimeout(defaultStreamIdle); got != 10*time.Second {
+		t.Errorf("override ignored: %s", got)
+	}
+}
+
+// TestStallGuardWaivesFirstByteForCompaction: a compaction call sends the whole
+// history, so its first token is the slowest of any call and losing it costs
+// the turn. It waits the full idle window instead.
+func TestStallGuardWaivesFirstByteForCompaction(t *testing.T) {
+	quiet := func(ctx context.Context, _ string, _ provider.LlmContext, _ provider.StreamConfig) (*provider.AssistantMessageEventStream, error) {
+		s := provider.NewAssistantMessageEventStream(0)
+		go func() {
+			defer s.Close()
+			// Nothing for longer than the first-byte deadline, then a reply.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(80 * time.Millisecond):
+			}
+			msg := agentcore.AssistantMessage{RoleField: agentcore.RoleAssistant,
+				Content:    agentcore.ContentList{agentcore.NewTextContent("summary")},
+				StopReason: agentcore.StopReasonEndTurn}
+			_ = s.Emit(ctx, provider.StreamDoneEvent{Message: msg})
+		}()
+		return s, nil
+	}
+	// A chat call with a 40ms first-byte deadline would be abandoned here.
+	chat := guardStream(quiet, 400*time.Millisecond, 40*time.Millisecond, "chat")
+	s, _ := chat(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
+	events := collect(t, s)
+	if _, bad := events[len(events)-1].(provider.StreamErrorEvent); !bad {
+		t.Fatalf("a silent chat call was not abandoned: %#v", events[len(events)-1])
+	}
+	// The same call as compaction waives it and gets its answer.
+	compaction := guardStream(quiet, 400*time.Millisecond, 400*time.Millisecond, "compaction")
+	s, _ = compaction(context.Background(), "m", provider.LlmContext{}, provider.StreamConfig{})
+	events = collect(t, s)
+	if _, ok := events[len(events)-1].(provider.StreamDoneEvent); !ok {
+		t.Fatalf("compaction was abandoned before its first token: %#v", events[len(events)-1])
 	}
 }

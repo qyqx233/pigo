@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -25,30 +26,65 @@ import (
 
 // defaultStreamIdle matches the transport's own watchdog, and honours the same
 // PIGO_STREAM_IDLE_TIMEOUT override so one setting governs both.
-const defaultStreamIdle = 5 * time.Minute
+//
+// defaultStreamFirstByte is the shorter deadline for a call that has produced
+// nothing at all. A model that has not emitted its first token after two
+// minutes is hung rather than slow, and since nothing reached the user the
+// call can simply be re-issued.
+const (
+	defaultStreamIdle      = 5 * time.Minute
+	defaultStreamFirstByte = 2 * time.Minute
+)
 
-func streamIdleTimeout() time.Duration {
-	if v := os.Getenv("PIGO_STREAM_IDLE_TIMEOUT"); v != "" {
+func envDuration(name string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(name); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
 		}
 	}
-	return defaultStreamIdle
+	return fallback
+}
+
+func streamIdleTimeout() time.Duration {
+	return envDuration("PIGO_STREAM_IDLE_TIMEOUT", defaultStreamIdle)
+}
+
+// streamFirstByteTimeout never exceeds the idle limit: a deployment that
+// shortens the idle window means calls to be abandoned sooner, not later.
+func streamFirstByteTimeout(idle time.Duration) time.Duration {
+	d := envDuration("PIGO_STREAM_FIRST_BYTE_TIMEOUT", defaultStreamFirstByte)
+	if d > idle {
+		return idle
+	}
+	return d
 }
 
 // streamStallError reports an abandoned call. It classifies itself as
 // transient for provider.IsTransient.
-type streamStallError struct{ idle time.Duration }
+type streamStallError struct {
+	idle time.Duration
+	// silent is set when the call was abandoned before producing anything.
+	silent bool
+}
 
 func (e *streamStallError) Error() string {
+	if e.silent {
+		return fmt.Sprintf("the model produced nothing within %s; the call was abandoned", e.idle)
+	}
 	return fmt.Sprintf("the model sent nothing for %s; the call was abandoned", e.idle)
 }
 
 func (e *streamStallError) Transient() bool { return true }
 
-// guardStream decorates inner so a call with no event for idle is cancelled
-// and ended with a streamStallError.
-func guardStream(inner provider.StreamFn, idle time.Duration) provider.StreamFn {
+// guardStream decorates inner so a call that stops making progress is
+// cancelled and ended with a streamStallError.
+//
+// firstByte is the deadline until the model produces anything; pass idle to
+// waive it, as a compaction call does — it sends the whole history, so its
+// first token is the slowest of any call, and losing it costs the turn.
+//
+// label names the call in the diagnostic line an abnormal end writes.
+func guardStream(inner provider.StreamFn, idle, firstByte time.Duration, label string) provider.StreamFn {
 	if inner == nil || idle <= 0 {
 		return inner
 	}
@@ -60,24 +96,84 @@ func guardStream(inner provider.StreamFn, idle time.Duration) provider.StreamFn 
 			return in, err
 		}
 		out := provider.NewAssistantMessageEventStream(0)
-		go relayGuarded(ctx, cancel, in, out, idle)
+		go relayGuarded(ctx, cancel, in, out, idle, firstByte, callReport{label: label, model: model})
 		return out, nil
 	}
 }
 
-// relayGuarded forwards the inner stream, restarting the idle timer on every
-// event. When the timer fires it cancels the inner call, emits the stall error
-// in its place, and drains what the inner stream still sends so its producer
-// can finish.
-func relayGuarded(ctx context.Context, cancel context.CancelFunc, in, out *provider.AssistantMessageEventStream, idle time.Duration) {
+// callReport is what an abnormal end writes to the log. It is counts and
+// timings only: no message content, no request headers. See
+// spec/turn-lifecycle-and-timeouts.md section 13 — the case that prompted it
+// could not be explained from anything that reached disk.
+type callReport struct {
+	label string // "chat", "compaction", "subagent"
+	model string
+
+	events   int           // everything the provider sent
+	progress int           // events that actually grew the message
+	first    time.Duration // to the first of those; 0 when there was none
+	maxGap   time.Duration // the longest run without one
+}
+
+// log writes the one line, naming the session and turn when the context has
+// them. `progress=0` with a large `events` is the signature of an upstream
+// that keeps a connection alive while producing nothing.
+func (r callReport) log(ctx context.Context, outcome string, idle, firstByte, elapsed time.Duration) {
+	session, turn := "-", "-"
+	if info := turnFrom(ctx); info != nil {
+		session, turn = shortID(info.sessionID), shortID(info.turnID)
+	}
+	first := "-"
+	if r.first > 0 {
+		first = r.first.Round(time.Millisecond).String()
+	}
+	log.Printf("pigo-server: call %s/%s %s model=%s: %s after %s: events=%d progress=%d first=%s max_gap=%s limits=%s/%s",
+		session, turn, r.label, r.model, outcome, elapsed.Round(time.Second),
+		r.events, r.progress, first, r.maxGap.Round(time.Millisecond), firstByte, idle)
+}
+
+// progressSize measures how much the model has produced so far. A heartbeat or
+// an empty delta leaves it unchanged, which is the whole point: the guard
+// watches the message growing, not the connection being busy.
+func progressSize(msg agentcore.AssistantMessage) int {
+	n := 0
+	for _, c := range msg.Content {
+		switch v := c.(type) {
+		case agentcore.TextContent:
+			n += len(v.Text)
+		case agentcore.ThinkingContent:
+			n += len(v.Thinking)
+		case agentcore.ToolCallContent:
+			n += len(v.Name) + len(v.Arguments)
+		}
+	}
+	return n
+}
+
+// relayGuarded forwards the inner stream, restarting the idle timer whenever
+// the message grows. When the timer fires it cancels the inner call, emits the
+// stall error in its place, and drains what the inner stream still sends so its
+// producer can finish.
+//
+// Until the first output the deadline is the shorter firstByte one; after it,
+// the idle one.
+func relayGuarded(ctx context.Context, cancel context.CancelFunc, in, out *provider.AssistantMessageEventStream, idle, firstByte time.Duration, report callReport) {
 	defer cancel()
-	timer := time.NewTimer(idle)
+	if firstByte <= 0 || firstByte > idle {
+		firstByte = idle
+	}
+	started := time.Now()
+	timer := time.NewTimer(firstByte)
 	defer timer.Stop()
 
 	var (
-		last    agentcore.AssistantMessage
-		stalled bool
-		forward = true
+		last     agentcore.AssistantMessage
+		size     int
+		lastAt   = started
+		stalled  bool
+		finished bool // the provider ended the call itself
+		forward  = true
+		deadline = firstByte
 	)
 	events := in.Events()
 	for events != nil {
@@ -87,8 +183,12 @@ func relayGuarded(ctx context.Context, cancel context.CancelFunc, in, out *provi
 				events = nil
 				continue
 			}
+			report.events++
 			if stalled {
 				continue
+			}
+			if _, ok := ev.(provider.StreamDoneEvent); ok {
+				finished = true
 			}
 			switch e := ev.(type) {
 			case provider.StreamStartEvent:
@@ -100,7 +200,20 @@ func relayGuarded(ctx context.Context, cancel context.CancelFunc, in, out *provi
 			case provider.StreamToolCallEvent:
 				last = e.Partial
 			}
-			timer.Reset(idle)
+			if n := progressSize(last); n > size {
+				size = n
+				now := time.Now()
+				if report.progress == 0 {
+					report.first = now.Sub(started)
+					deadline = idle
+				}
+				if gap := now.Sub(lastAt); gap > report.maxGap {
+					report.maxGap = gap
+				}
+				lastAt = now
+				report.progress++
+				timer.Reset(deadline)
+			}
 			if forward && out.Emit(ctx, ev) != nil {
 				forward = false
 			}
@@ -110,7 +223,7 @@ func relayGuarded(ctx context.Context, cancel context.CancelFunc, in, out *provi
 			}
 			stalled = true
 			cancel()
-			err := &streamStallError{idle: idle}
+			err := &streamStallError{idle: deadline, silent: report.progress == 0}
 			msg := last
 			msg.RoleField = agentcore.RoleAssistant
 			msg.StopReason = agentcore.StopReasonError
@@ -120,12 +233,27 @@ func relayGuarded(ctx context.Context, cancel context.CancelFunc, in, out *provi
 			}
 		}
 	}
+	if gap := time.Since(lastAt); gap > report.maxGap {
+		report.maxGap = gap
+	}
+	var result error
 	if !stalled {
 		if res, err := in.Result(context.Background()); err != nil {
+			result = err
 			out.SetError(err)
 		} else {
 			out.SetResult(res)
 		}
+	}
+	// Only an abnormal end is reported: a healthy call is already one ledger
+	// row, and a line per call would bury the ones worth reading.
+	switch {
+	case stalled:
+		report.log(ctx, "stalled", idle, firstByte, time.Since(started))
+	case ctx.Err() != nil && !finished:
+		report.log(ctx, "aborted", idle, firstByte, time.Since(started))
+	case result != nil:
+		report.log(ctx, "error", idle, firstByte, time.Since(started))
 	}
 	out.Close()
 }

@@ -415,8 +415,10 @@ func (s *apiServer) meterStreams(managed *managedSession, prov provider.Provider
 	// only the provider sees the model-facing names.
 	stream := s.nameStream(s.conversationStream(provider.StreamFnFromProvider(prov), providerName, managed.meta.ID), providerName)
 	idle := streamIdleTimeout()
-	managed.runCfg.Stream = guardStream(s.meter.wrap(stream, providerName, "chat"), idle)
-	managed.runCfg.SummaryStream = guardStream(s.meter.wrap(stream, providerName, "compaction"), idle)
+	managed.runCfg.Stream = guardStream(s.meter.wrap(stream, providerName, "chat"), idle, streamFirstByteTimeout(idle), "chat")
+	// Compaction waives the first-byte deadline: it sends the whole history,
+	// so its first token is the slowest, and abandoning it costs the turn.
+	managed.runCfg.SummaryStream = guardStream(s.meter.wrap(stream, providerName, "compaction"), idle, idle, "compaction")
 }
 
 // newTurn describes one user turn for the billing meter.

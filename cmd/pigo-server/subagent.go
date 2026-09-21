@@ -403,7 +403,7 @@ func (s *apiServer) runSubagent(ctx context.Context, managed *managedSession, ca
 	c := call{provider: providerName, kind: "subagent", keySource: s.keySource(userID, providerName)}
 	stream := s.nameStream(s.conversationStream(provider.StreamFnFromProvider(prov), providerName, managed.meta.ID+"#"+callID), providerName)
 	idle := streamIdleTimeout()
-	cfg.Stream = guardStream(s.meter.wrapAs(stream, c), idle)
+	cfg.Stream = guardStream(s.meter.wrapAs(stream, c), idle, streamFirstByteTimeout(idle), "subagent:"+shortID(callID))
 	cfg.SummaryStream = cfg.Stream
 	params := s.contextParams(providerName, model)
 	cfg.ContextWindow = params.Window
